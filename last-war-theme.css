@@ -1,0 +1,47 @@
+/* Last WarD's Last War Wiki palette and original branding. */
+:root{color-scheme:light;--page:#f0f6ff;--ink:#001b59;--accent:#275de2;--muted:#2b4277;--line:#c4d0ed;--soft:#f0f6ff;--lavender:#e2ebff;--blue:#e2ebff;--shadow:0 8px 28px #001b5908}
+body{isolation:isolate;font-family:ui-sans-serif,system-ui,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji"}
+body::before,body::after{content:"";position:fixed;pointer-events:none;z-index:-1;opacity:.035;background-size:contain;background-repeat:no-repeat;width:340px}
+body::before{left:-90px;top:150px;height:720px;background-image:url('assets/wiki-hero.webp')}
+body::after{right:-80px;top:240px;height:620px;background-image:url('assets/wiki-soldier.webp')}
+.topbar{background:#001b59;color:#fff;border-bottom:3px solid #56bdf4;backdrop-filter:none;gap:28px}
+.brand{font-size:25px;font-weight:750;letter-spacing:-1px;gap:12px;line-height:1.05}
+.brand-logo{display:block;width:76px;height:48px;object-fit:contain;flex-shrink:0}
+.brand b{font-weight:750}.brand small{color:#d4dfff;font-size:7px;letter-spacing:1.7px;margin-top:7px}
+.global-search{background:#092e72;border-color:#5873a1;color:#fff}
+.global-search>span,.global-search input{color:#fff}.global-search input::placeholder{color:#d4dfff}
+.global-search button{background:#173b79;color:#d4dfff;border-color:#5873a1}
+.header-select>span,.header-select #language-icon,.header-select select{color:#fff}
+.header-select select option{color:#001b59;background:#fff}.control-divider{background:#5873a1}
+.topbar .icon-button{color:#fff}.topbar .icon-button:hover{background:#173b79}
+.nav-link{color:#2b4277}.nav-link:hover{background:#e2ebff;color:#001b59}
+.nav-link.active{background:#001b59;color:#fff;box-shadow:inset 3px 0 #56bdf4}
+.nav-link.active .nav-count{color:#d4dfff}.nav-count,.nav-label,.snapshot{color:#5873a1!important}
+.nav-link.active .nav-count{color:#d4dfff!important}.nav-sub a{border-color:#a1acca}
+.context-card{background:#e2ebff;border-color:#b2c7f2}.welcome-banner{background:#e2ebff;border-color:#b2c7f2}
+.page-heading h1,.article-header h1{font-weight:750;color:#001b59}
+.eyebrow,.category-icon{color:#275de2}.eyebrow .line{background:#56bdf4}
+.section-heading h2{position:relative;padding-bottom:7px}.section-heading h2::after{content:"";position:absolute;bottom:0;inset-inline-start:0;width:28px;height:2px;background:#56bdf4}
+.season-pill{background:#e2ebff;border-color:#b2c7f2;color:#001b59}
+.home-art{background:radial-gradient(ellipse at 50% 100%,#b6d7ff,#e2ebff 80%)}
+.home-art img{filter:drop-shadow(0 9px 8px #001b5914)}.home-art-label{color:#2b4277}
+.home-lead,.category-card,.entity-card,.article-header,.article-body,.related-link,.quick-link{border-color:#c4d0ed}
+.category-card{border-top:3px solid #56bdf4}.category-icon{background:#e2ebff}
+.category-card:hover,.entity-card:hover,.related-link:hover{border-color:#275de2;box-shadow:0 7px 22px #001b5910}
+.entity-art,.article-art{background:#e2ebff}.type-chip{color:#001b59;background:#ffffffeb;border-color:#b2c7f2}
+.button.primary,.pill.selected{background:linear-gradient(110deg,#275de2,#56bdf4);border-color:#275de2;color:#fff}
+.button.primary:hover,.pill.selected:hover{background:linear-gradient(110deg,#154bce,#42aee8)}
+.pill{border-color:#a1acca;color:#2b4277;background:#fff}.pill:hover{background:#e2ebff}
+.view-controls button.active{color:#fff;background:#275de2}.article-tabs{border-color:#a1acca}
+.article-tabs a.active{color:#001b59;border-color:#275de2;font-weight:750}
+.data-table th{background:#001b59;color:#fff;border-color:#5873a1}.data-table td{border-color:#dce6f8}
+.data-table tbody tr:nth-child(even){background:#f5f8ff}.data-table tbody tr:hover{background:#e2ebff}
+.data-table td a,.article-body a:not(.button),.overview-link strong{color:#275de2}
+.overview-link,.table-total{background:#f0f6ff;border-color:#b2c7f2}.table-toolbar input,.table-toolbar select{border-color:#a1acca}
+.badge:not(.ur):not(.ssr):not(.sr):not(.fallback):not(.archived){background:#e2ebff;color:#2b4277;border-color:#c4d0ed}
+.footer-brand{display:flex;align-items:center;gap:10px;flex-shrink:0}.footer-brand img{width:47px;height:30px;object-fit:contain}.footer-brand strong{font-size:12px;letter-spacing:0;color:#001b59}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline-color:#56bdf4}
+@media(max-width:1250px){.topbar{gap:20px}.brand{font-size:22px}.brand-logo{width:64px;height:43px}}
+@media(max-width:1000px){.brand{font-size:20px;gap:8px}.brand-logo{width:56px;height:38px}.brand small{font-size:6px;letter-spacing:1px}}
+@media(max-width:760px){body::before,body::after{display:none}.topbar{gap:10px;border-bottom-width:2px}.brand{font-size:19px;gap:7px}.brand-logo{width:48px;height:32px}.brand small{font-size:5px;letter-spacing:1px;margin-top:5px}.global-search{background:#092e72}.sidebar{background:#f0f6ff}.nav-scrim{background:#001b5960}.context-controls{gap:3px}.footer-brand img{width:38px;height:25px}}
+@media(max-width:370px){.brand{font-size:17px;gap:5px}.brand-logo{width:40px;height:29px}.brand small{font-size:4.5px;letter-spacing:.7px}.topbar{gap:6px}}
