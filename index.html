@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Last Warning — your season-aware Last War field guide. Explore heroes, buildings, technology, units and game modes with original game art.">
+<meta name="theme-color" content="#17164f"><title>Last Warning · Last War field guide</title>
+<link rel="stylesheet" href="styles-v2.css">
+<script defer src="data-v2.js"></script><script defer src="mode-data.js"></script><script defer src="app-v2.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-button mobile-only" aria-label="Open navigation" aria-expanded="false"></button>
+  <a class="brand" id="brand" href="#home" aria-label="Last Warning home"><span class="brand-mark">W<span>!</span></span><span>LAST <b>WARNING</b><small>LAST WAR FIELD GUIDE</small></span></a>
+  <form id="global-search" class="global-search" role="search"><span id="search-icon" aria-hidden="true"></span><input id="search-input" type="search" autocomplete="off" aria-label="Search the wiki" placeholder="Search heroes, buildings, skills…"><button type="submit" id="search-go" aria-label="Search">↵</button></form>
+  <div class="context-controls"><label class="header-select"><span id="season-label">Season</span><select id="season-select" aria-label="Current season"></select></label><span class="control-divider"></span><label class="header-select language-control"><span id="language-icon" aria-hidden="true">◎</span><select id="language-select" aria-label="Language"></select></label></div>
+</header>
+<div class="app-shell">
+  <aside id="sidebar" class="sidebar" aria-label="Wiki navigation"><div id="navigation"></div><div id="sidebar-context"></div></aside>
+  <button id="nav-scrim" class="nav-scrim" aria-label="Close navigation" hidden></button>
+  <div class="page-area"><div id="setup-banner"></div><main id="content" tabindex="-1"></main><footer id="footer"></footer></div>
+</div>
+<div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
+<noscript><p class="no-script">This local wiki needs JavaScript to display its game data and language controls.</p></noscript>
+</body></html>
