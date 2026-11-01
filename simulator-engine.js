@@ -7,20 +7,21 @@
   'use strict';
   var DEFAULT_MODEL = Object.freeze({
     defenseK: 1.8, damageScale: 0.55, critMultiplier: 1.75, baseCritChance: 0.12,
-    techPerLevel: 0.008, gearPerLevel: 0.012, typeCounterBonus: 0.2,
+    typeCounterBonus: 0.2,
     autoInterval: 1.5, activeInterval: 8, activeFirst: 4, genericAutoCoefficient: 1,
     genericActiveCoefficient: 2.4, maxDuration: 90, maxEvents: 12000
   });
   var MODEL_NOTES = [
     'Estimated comparison model, not the official Last War battle formula.',
-    'Recovered client template/rank parameters provide base stats. Flat M5 gear parameters are used where available; team technology and combat composition use estimates.',
+    'Recovered client template/rank parameters and selected equipment curves provide stat inputs. Only source-reviewed technology effects are applied; final combat composition remains a model.',
     'Damage = attack² / (attack + defense × defenseK) × selected skill coefficient × damageScale × critical and type factors. This equation is a modeling assumption.',
     'Assumed type cycle: aircraft → tank → missile → aircraft. The configured bonus is estimated.',
-    'Critical chance uses an estimated base plus a chip-level adjustment; critical multiplier is configurable, not an official formula.',
+    'Critical chance uses an assumed base plus recovered gear/research chance effects, capped at an estimated 85%; critical multiplier remains a model parameter. Other unreviewed percentage effects are not guessed.',
     'Only generic auto and active damage are simulated. Passives, buffs, shields, DOT, targeting exceptions, UAV and Dominator mechanics are not executed.',
     'Equal-time events resolve in stable queue order. The recorded server timing and RNG are not reproduced.',
     'Snapshot configuration and historic report schema versions do not establish current live-game equivalence.'
   ];
+  var CAPABILITIES = Object.freeze({ skillTriggers: false, targeting: 'front-row-estimate', rng: 'seeded-model-not-server', technology: 'source-reviewed-effects-only', gear: 'recovered-curves-and-cumulative-promotions' });
   function finite(value, fallback) { var n = Number(value); return Number.isFinite(n) ? n : fallback; }
   function clamp(value, low, high) { return Math.min(high, Math.max(low, value)); }
   function int(value, fallback) { return Math.round(finite(value, fallback)); }
@@ -36,7 +37,6 @@
     Object.keys(m).forEach(function (k) { if (input && input[k] !== undefined) m[k] = finite(input[k], m[k]); });
     m.defenseK = clamp(m.defenseK, 0, 100); m.damageScale = clamp(m.damageScale, 0.001, 100);
     m.critMultiplier = clamp(m.critMultiplier, 1, 10); m.baseCritChance = clamp(m.baseCritChance, 0, 1);
-    m.techPerLevel = clamp(m.techPerLevel, 0, 0.1); m.gearPerLevel = clamp(m.gearPerLevel, 0, 0.1);
     m.typeCounterBonus = clamp(m.typeCounterBonus, 0, 2); m.maxDuration = clamp(m.maxDuration, 0.05, 600);
     m.maxEvents = clamp(int(m.maxEvents, 12000), 1, 100000);
     return m;
@@ -71,6 +71,81 @@
     return chosen || sorted[0] || null;
   }
   function modeAvailable(mode) { return !!mode && mode !== false && mode.available !== false && mode.supported !== false; }
+  function technologyModifiers(input, data, unitType, role, context) {
+    var result = { flat: { hp: 0, attack: 0, defense: 0, critChance: 0, critMultiplier: 0 }, percent: { hp: 0, attack: 0, defense: 0 }, research: {}, applied: [], skipped: [], unsupported: [], notes: [] };
+    if (typeof input === 'number') { result.notes.push('Legacy numeric technology level was ignored: choose individual research; no invented research levels or generic stat boost were imported.'); return result; }
+    var selected = input && input.research || {}, tech = data.technology || {}, records = array(tech.research);
+    var squadNo = clamp(int(input && input.squadNo, 1), 1, 4), rawCounts = input && input.deployedArmyTypeCounts || context && context.deployedTypes, counts = {};
+    if (rawCounts) Object.keys(rawCounts).forEach(function (k) { counts[typeName(k)] = clamp(int(rawCounts[k], 0), 0, 5); });
+    Object.keys(selected).sort().forEach(function (id) {
+      var research = records.find(function (r) { return String(r.id) === String(id); });
+      if (!research) { result.unsupported.push({ researchId: id, reason: 'Research definition unavailable' }); return; }
+      var requested = selected[id] && typeof selected[id] === 'object' ? selected[id].level : selected[id];
+      var lv = clamp(int(requested, 0), 0, int(research.maxLevel, 0)); result.research[id] = lv;
+      if (lv === 0) return;
+      if (research.squadNo && Number(research.squadNo) !== squadNo) { result.skipped.push({ researchId: id, level: lv, reason: 'Research belongs to Squad ' + research.squadNo + '; selected Squad ' + squadNo }); return; }
+      var row = array(research.levels).find(function (r) { return Number(r.level) === lv; });
+      if (!row) { result.unsupported.push({ researchId: id, level: lv, reason: 'Exact research level row unavailable; no interpolation used' }); return; }
+      array(row.effects).forEach(function (e) {
+        var mapping = tech.effectMappings && tech.effectMappings[e.effectId] || {}, effect = Object.assign({}, mapping, e);
+        var record = { researchId: research.id, level: lv, effectId: e.effectId, value: finite(effect.value, 0), stat: effect.stat, operation: effect.operation };
+        if (effect.supported !== true || !effect.stat || ['flat', 'percent'].indexOf(effect.operation) < 0) { record.reason = effect.reason || 'Effect operation not source-reviewed'; result.unsupported.push(record); return; }
+        var types = array(effect.unitTypes).map(typeName), effectSide = effect.side || 'both';
+        if (effect.squadNo && Number(effect.squadNo) !== squadNo) { record.reason = 'Effect belongs to a different squad research tree'; result.skipped.push(record); return; }
+        if (types.length && types.indexOf(unitType) < 0) { record.reason = 'Troop-type condition does not match'; result.skipped.push(record); return; }
+        if (effectSide !== 'both' && effectSide !== role) { record.reason = 'Attacker/defender condition does not match'; result.skipped.push(record); return; }
+        if (effect.multiplier) {
+          var multiplierType = typeName(effect.multiplier.armyType);
+          if (effect.multiplier.kind !== 'deployedArmyTypeCount' || !rawCounts) { record.reason = 'Requires reviewed deployed troop-type counts'; result.unsupported.push(record); return; }
+          record.sourceValue = record.value; record.deployedTypeCount = counts[multiplierType] || 0; record.value *= record.deployedTypeCount;
+        }
+        var stat = effect.stat === 'crit' ? 'critChance' : effect.stat;
+        if (!Object.prototype.hasOwnProperty.call(result[effect.operation], stat)) { record.reason = 'Unsupported stat/operation combination'; result.unsupported.push(record); return; }
+        result[effect.operation][stat] += record.value; result.applied.push(record);
+      });
+    });
+    return result;
+  }
+  function equipmentSelection(input, data) {
+    var items = array(data.gear && data.gear.items), names = ['weapon', 'armor', 'chip', 'radar'];
+    var result = { slots: {}, hp: 0, attack: 0, defense: 0, critChance: 0, applied: [], unsupported: [], notes: [] };
+    names.forEach(function (name, index) {
+      var raw = input && input[name], legacy = typeof raw === 'number' || typeof raw === 'string', cfg = raw && typeof raw === 'object' ? raw : { level: raw };
+      if (cfg.itemId !== undefined && Number(cfg.itemId) === 0) { result.slots[name] = { itemId: 0, level: 0, promotion: 0, quality: 0, name: 'Empty' }; return; }
+      var eligible = items.filter(function (item) { return Number(item.slot) === index + 1; });
+      var item = cfg.itemId !== undefined ? eligible.find(function (x) { return Number(x.id) === Number(cfg.itemId); }) : eligible.find(function (x) { return Number(x.quality) === 5; }) || eligible[0];
+      if (!item) { result.slots[name] = { itemId: cfg.itemId === undefined ? null : finite(cfg.itemId, 0), level: 0, promotion: 0 }; result.unsupported.push({ slot: name, reason: 'Equipment definition unavailable; no estimated increments applied' }); return; }
+      var maxLevel = Math.max.apply(null, [0].concat(array(item.perLevel).map(function (r) { return finite(r.level, 0); })));
+      var level = clamp(int(cfg.level, 0), int(item.minLevel, 0), maxLevel), minPromotion = int(item.minPromotion, 0), maxPromotion = int(item.maxPromotion, 0);
+      var promotion = clamp(int(cfg.promotion !== undefined ? cfg.promotion : cfg.stage, minPromotion), minPromotion, maxPromotion);
+      var promotionRequiresLevel = finite(item.promotionRequiresLevel, maxLevel);
+      if (promotion > 0 && level < promotionRequiresLevel) {
+        if (minPromotion > 0) { level = promotionRequiresLevel; result.notes.push(name + ': recovered minimum promotion requires base level ' + promotionRequiresLevel + '; level normalized.'); }
+        else { promotion = 0; result.notes.push(name + ': blueprint promotion requires base level ' + promotionRequiresLevel + '; premature promotion was not applied.'); }
+      }
+      var target = item.promotionTarget || item.targetPromotion;
+      if (target && promotion >= finite(target.stage !== undefined ? target.stage : target.promotion, Infinity)) {
+        var upgraded = eligible.find(function (x) { return Number(x.id) === Number(target.itemId); });
+        if (upgraded) { item = upgraded; promotion = clamp(promotion, int(item.minPromotion, 0), int(item.maxPromotion, promotion)); }
+      }
+      var base = array(item.perLevel).find(function (r) { return Number(r.level) === level; });
+      var stages = array(item.promotionStages || item.promotions), stage = stages.find(function (r) { return Number(r.stage !== undefined ? r.stage : r.promotion !== undefined ? r.promotion : r.level) === promotion; });
+      result.slots[name] = { itemId: Number(item.id), level: level, promotion: promotion, quality: item.quality, name: item.name || name };
+      if (legacy) result.notes.push('Legacy ' + name + ' level imported using the default M5 item and promotion 0; no blueprint or MR progress was inferred.');
+      if (int(cfg.level, 0) !== level) result.notes.push(name + ' level clamped to recovered equipment curve ' + maxLevel + '; promotions are separate from base level.');
+      [base, stage].forEach(function (row, rowIndex) {
+        if (!row) return;
+        ['hp', 'attack', 'defense'].forEach(function (stat) { result[stat] += finite(row[stat], 0); });
+        var effects = row.effects || row.attributes || {};
+        var critChance = finite(effects[50011], 0); result.critChance += critChance;
+        result.applied.push({ slot: name, itemId: item.id, source: rowIndex ? 'cumulative-promotion-row-once' : 'base-level-row', level: rowIndex ? promotion : level, hp: finite(row.hp, 0), attack: finite(row.attack, 0), defense: finite(row.defense, 0), critChance: critChance });
+        Object.keys(effects).forEach(function (id) { if ([50005, 50008, 50010, 50011].indexOf(Number(id)) < 0) result.unsupported.push({ slot: name, itemId: item.id, effectId: Number(id), value: effects[id], reason: 'Additional equipment effect retained, not applied without its reviewed replacement/operation mapping' }); });
+      });
+      if (!base) result.unsupported.push({ slot: name, itemId: item.id, level: level, reason: 'Exact base-level row missing; no interpolation used' });
+      if (promotion > 0 && !stage) result.unsupported.push({ slot: name, itemId: item.id, promotion: promotion, reason: 'Exact promotion row missing; no fabricated promotion/MR increment' });
+    });
+    return result;
+  }
   function rankRequired(skill) { var v = skill.needRank !== undefined ? skill.needRank : skill.need_rank; return finite(typeof v === 'string' ? v.split(/[;,]/)[0] : v, 1); }
   function selectSkillVariant(skill, rankId) {
     var all = array(skill.variants).sort(function (a, b) { return rankRequired(a) - rankRequired(b) || finite(a.star, 0) - finite(b.star, 0); });
@@ -153,26 +228,16 @@
         notes.push('Awakening uses available flat parameters only; awakening trigger, energy and passive mechanics are omitted.');
       }
     }
-    var gear = cfg.gear || {}, w = clamp(finite(gear.weapon, 0), 0, 100), a = clamp(finite(gear.armor, 0), 0, 100), ch = clamp(finite(gear.chip, 0), 0, 100), ra = clamp(finite(gear.radar, 0), 0, 100);
-    var tech = clamp(finite(typeof teamTech === 'object' ? teamTech.level : teamTech, 0), 0, 100), techMult = 1 + tech * model.techPerLevel;
-    var gearItems = array(data.gear && data.gear.items), gearValues = [w, a, ch, ra], exactGear = gearItems.length > 0;
-    if (exactGear) {
-      gearValues.forEach(function (gearLevel, index) {
-        var items = gearItems.filter(function (item) { return Number(item.slot) === index + 1 && Number(item.quality) === 5; });
-        var item = items[0], gearRow = item && rowAtLevel(item.perLevel, gearLevel);
-        if (gearRow) { stats.hp += finite(gearRow.hp, 0); stats.attack += finite(gearRow.attack, 0); stats.defense += finite(gearRow.defense, 0); }
-      });
-      notes.push('Gear assumes the first recovered M5 item for each slot at the selected level; flat parameters are added, percentage effects/promotions are omitted.');
-      stats.hp *= techMult; stats.attack *= techMult; stats.defense *= techMult;
-    } else {
-      stats.hp *= (1 + a * model.gearPerLevel + ra * model.gearPerLevel * 0.35) * techMult;
-      stats.attack *= (1 + w * model.gearPerLevel + ch * model.gearPerLevel * 0.35) * techMult;
-      stats.defense *= (1 + ra * model.gearPerLevel + a * model.gearPerLevel * 0.35) * techMult;
-      notes.push('No gear table available: explicit estimated per-level slot multipliers used.');
-    }
+    var role = cfg.role === 'defender' ? 'defender' : 'attacker', troopType = typeName(hero.type || hero.unitType || hero.army_type);
+    var gearInfo = equipmentSelection(cfg.gear || {}, data), tech = technologyModifiers(teamTech, data, troopType, role, { deployedTypes: cfg.deployedTypes });
+    ['hp', 'attack', 'defense'].forEach(function (stat) { stats[stat] = (stats[stat] + gearInfo[stat] + tech.flat[stat]) * (1 + tech.percent[stat]); });
+    notes = notes.concat(gearInfo.notes, tech.notes);
+    notes.push('Recovered equipment and research quantities are applied with the stated flat/percent model composition; the complete official stat evaluator is not reproduced.');
+    if (gearInfo.unsupported.length) notes.push('Some additional equipment effects are retained but unapplied; see unsupportedGearEffects.');
+    if (tech.unsupported.length) notes.push('Some selected research effects are unsupported and were not applied; see unsupportedTechnology.');
     ['hp', 'attack', 'defense'].forEach(function (k) { stats[k] = Math.max(1, Math.round(finite(stats[k], 1))); });
-    stats.critChance = clamp(finite(hero.critChance, model.baseCritChance) + ch * 0.0015, 0, 0.85);
-    stats.critMultiplier = model.critMultiplier;
+    stats.critChance = clamp(finite(hero.critChance, model.baseCritChance) + gearInfo.critChance + tech.flat.critChance, 0, 0.85);
+    stats.critMultiplier = Math.max(1, model.critMultiplier + tech.flat.critMultiplier);
     var unlockLevels = sourceHero.skillUnlockLevels || hero.skillUnlockLevels || [], unlockRanks = sourceHero.skillUnlockRanks || hero.skillUnlockRanks || [];
     var rawSkills = array(sourceHero.skills || hero.skills || []).map(function (s, i) { return Object.assign({}, s, { _unlockLevel: finite(unlockLevels[i], 1), _unlockRank: finite(unlockRanks[i], 1) }); });
     if (modeName !== 'base') {
@@ -207,22 +272,28 @@
     var used = [autos[0], activeSkills[0]].filter(Boolean), unsupported = skills.filter(function (s) { return used.indexOf(s) < 0; }).map(function (s) { return { heroId: hero.id, skillId: s.id, groupId: s.groupId, name: s.name, level: s.level, reason: s.locked ? 'Locked: requires hero level ' + s.unlockLevel + ' and rank ' + s.unlockRank : s.coefficient <= 0 ? 'Non-damaging ability: heal/shield/buff mechanics not simulated; no damage is invented' : s.type === 'passive' ? 'Passive/buff mechanics omitted' : 'Only one auto and one active damage profile are executed' }; });
     cfg.form = modeName; cfg.level = level; cfg.exp = Math.max(0, finite(cfg.exp, 0)); cfg.shardLevel = shard;
     cfg.skillLevel = Math.max(1, int(cfg.skillLevel, 20)); cfg.weaponLevel = weaponLevel; cfg.awakenLevel = awakenLevel;
-    cfg.gear = { weapon: w, armor: a, chip: ch, radar: ra };
+    cfg.gear = gearInfo.slots; cfg.role = role;
     if (cfg.skillLevels) { cfg.skillLevels = Object.assign({}, cfg.skillLevels); Object.keys(cfg.skillLevels).forEach(function (k) { cfg.skillLevels[k] = clamp(int(cfg.skillLevels[k], 1), 1, 100); }); }
-    return { heroId: Number(hero.id || cfg.heroId), name: hero.name || ('Hero ' + cfg.heroId), image: selectedMode && selectedMode.image || hero.image || '', type: typeName(hero.type || hero.unitType || hero.army_type), form: modeName,
+    return { heroId: Number(hero.id || cfg.heroId), name: hero.name || ('Hero ' + cfg.heroId), image: selectedMode && selectedMode.image || hero.image || '', type: troopType, role: role, form: modeName,
       level: level, effectiveLevel: level, unusedExp: xp.unusedExp, experience: xp, rankId: Number(rank.id || rankId), shardLevel: shard,
-      stats: stats, baseStats: baseStats, skills: used, allSkills: skills, unsupportedSkills: unsupported, notes: notes, config: cfg, teamTech: tech };
+      stats: stats, baseStats: baseStats, skills: used, allSkills: skills, unsupportedSkills: unsupported, notes: notes, config: cfg,
+      gear: gearInfo.slots, gearEffects: gearInfo.applied, unsupportedGearEffects: gearInfo.unsupported,
+      technology: tech, unsupportedTechnology: tech.unsupported, teamTech: { research: tech.research, squadNo: clamp(int(teamTech && teamTech.squadNo, 1), 1, 4) }, capabilities: CAPABILITIES };
   }
   function seedNumber(value) { if (typeof value === 'number' && Number.isFinite(value)) return value >>> 0; var s = String(value === undefined ? 12345 : value), h = 2166136261; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
   function rngFor(seed) { var a = seedNumber(seed); return function () { a = (a + 0x6D2B79F5) | 0; var t = a; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
   function counterFactor(attacker, defender, model) { return ({ aircraft: 'tank', tank: 'missile', missile: 'aircraft' })[attacker] === defender ? 1 + model.typeCounterBonus : 1; }
   function simulate(input, data) {
     input = input || {}; data = data || {}; var model = modelOptions(input.model), rand = rngFor(input.seed), events = [], frames = [], queue = [], serial = 0;
+    var attackerSide = input.attackerSide === 'right' ? 'right' : 'left';
+    var roles = { left: attackerSide === 'left' ? 'attacker' : 'defender', right: attackerSide === 'right' ? 'attacker' : 'defender', attackerSide: attackerSide, defenderSide: attackerSide === 'left' ? 'right' : 'left' };
     var tech = input.tech || {}, teams = { left: [], right: [] }, initial = { left: [], right: [] }, errors = [], notes = MODEL_NOTES.slice(), unsupported = [];
     ['left', 'right'].forEach(function (side) {
+      var deployedTypes = { tank: 0, missile: 0, aircraft: 0 };
+      array(input[side]).slice(0, 5).forEach(function (c) { var h = c && heroById(c.heroId, data); if (h) { var t = typeName(h.type || h.unitType || h.army_type); deployedTypes[t] = (deployedTypes[t] || 0) + 1; } });
       for (var slot = 0; slot < 5; slot++) {
         var cfg = Array.isArray(input[side]) ? input[side][slot] : null, unit = null;
-        try { unit = computeUnit(cfg, tech[side], data, model); } catch (e) { errors.push(side + ' slot ' + (slot + 1) + ': ' + e.message); }
+        try { unit = computeUnit(cfg ? Object.assign({}, cfg, { role: roles[side], deployedTypes: deployedTypes }) : cfg, tech[side] && typeof tech[side] === 'object' ? Object.assign({}, tech[side], { deployedArmyTypeCounts: deployedTypes }) : tech[side], data, model); } catch (e) { errors.push(side + ' slot ' + (slot + 1) + ': ' + e.message); }
         initial[side].push(unit);
         if (!unit) { teams[side].push(null); continue; }
         var combatant = Object.assign({}, unit, { side: side, slot: slot, hp: unit.stats.hp, damageDone: 0, damageTaken: 0, healingDone: 0, kills: 0 });
@@ -232,7 +303,7 @@
     });
     function living(side) { return teams[side].filter(function (u) { return u && u.hp > 0; }); }
     function frame(time) { var f = { time: time, left: teams.left.map(function (u) { return u ? u.hp : 0; }), right: teams.right.map(function (u) { return u ? u.hp : 0; }) }; if (frames.length && frames[frames.length - 1].time === time) frames[frames.length - 1] = f; else frames.push(f); }
-    function summaries(side) { var us = teams[side].map(function (u) { return u ? { heroId: u.heroId, name: u.name, slot: u.slot, type: u.type, form: u.form, hp: u.hp, maxHp: u.stats.hp, stats: u.stats, alive: u.hp > 0, damageDone: u.damageDone, damageTaken: u.damageTaken, healingDone: u.healingDone, kills: u.kills } : null; }); return { units: us, totalDamage: us.reduce(function (n, u) { return n + (u ? u.damageDone : 0); }, 0), totalHealing: 0, survivors: us.filter(function (u) { return u && u.alive; }).length }; }
+    function summaries(side) { var us = teams[side].map(function (u) { return u ? { heroId: u.heroId, name: u.name, slot: u.slot, type: u.type, role: u.role, form: u.form, hp: u.hp, maxHp: u.stats.hp, stats: u.stats, alive: u.hp > 0, damageDone: u.damageDone, damageTaken: u.damageTaken, healingDone: u.healingDone, kills: u.kills } : null; }); return { units: us, totalDamage: us.reduce(function (n, u) { return n + (u ? u.damageDone : 0); }, 0), totalHealing: 0, survivors: us.filter(function (u) { return u && u.alive; }).length }; }
     frame(0); var time = 0, processed = 0, reason = 'elimination';
     if (!living('left').length || !living('right').length) { errors.push('Both sides need at least one valid hero.'); reason = 'empty-team'; }
     else while (queue.length && living('left').length && living('right').length) {
@@ -266,7 +337,8 @@
     events.push({ time: duration, type: 'end', winner: winner, reason: reason, amount: 0 });
     return { winner: winner, duration: duration, reason: reason, events: events, frames: frames, timeline: frames, initial: initial, left: left, right: right,
       totalDamage: { left: left.totalDamage, right: right.totalDamage }, seed: input.seed === undefined ? 12345 : input.seed, model: model,
-      notes: Array.from(new Set(notes)), modelNotes: MODEL_NOTES.slice(), unsupportedSkills: unsupported, caveats: MODEL_NOTES.slice(), errors: errors };
+      roles: roles, capabilities: CAPABILITIES, notes: Array.from(new Set(notes)), modelNotes: MODEL_NOTES.slice(), unsupportedSkills: unsupported, caveats: MODEL_NOTES.slice(), errors: errors };
   }
-  return { version: '0.1.0-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, computeUnit: computeUnit, resolveExperience: resolveExperience, simulate: simulate };
+  return { version: '0.2.0-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
+    computeUnit: computeUnit, resolveExperience: resolveExperience, simulate: simulate, equipmentSelection: equipmentSelection, technologyModifiers: technologyModifiers };
 });
