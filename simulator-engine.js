@@ -17,11 +17,11 @@
     'Damage = attack² / (attack + defense × defenseK) × selected skill coefficient × damageScale × critical and type factors. This equation is a modeling assumption.',
     'Assumed type cycle: aircraft → tank → missile → aircraft. The configured bonus is estimated.',
     'Critical chance uses an assumed base plus recovered gear/research chance effects, capped at an estimated 85%; critical multiplier remains a model parameter. Other unreviewed percentage effects are not guessed.',
-    'Only generic auto and active damage are simulated. Passives, buffs, shields, DOT, targeting exceptions, UAV and Dominator mechanics are not executed.',
+    'Only generic auto and active damage are simulated, with source-gated Bullet eligibility, target counts, Tesla fixed timing, DVA haste and Kimberly source-base rockets where exact unlocked metadata matches. Most passives, buffs, shields, DOT, targeting exceptions, UAV and Dominator mechanics remain omitted.',
     'Equal-time events resolve in stable queue order. The recorded server timing and RNG are not reproduced.',
     'Snapshot configuration and historic report schema versions do not establish current live-game equivalence.'
   ];
-  var CAPABILITIES = Object.freeze({ skillTriggers: false, targeting: 'front-row-estimate', rng: 'seeded-model-not-server', technology: 'source-reviewed-effects-only', gear: 'recovered-curves-and-cumulative-promotions' });
+  var CAPABILITIES = Object.freeze({ skillTriggers: false, limitedSourceMechanics: 'source-gated Bullet eligibility/counts, exactTesla timing, exactDVA haste and Kimberly16base rockets only; no general trigger/buff solver', targeting: 'front-row-estimate; sourceKimberly burst uses modeled random living hero', rng: 'seeded-model-not-server', technology: 'source-reviewed-effects-only', gear: 'recovered-curves-and-cumulative-promotions' });
   function finite(value, fallback) { var n = Number(value); return Number.isFinite(n) ? n : fallback; }
   function clamp(value, low, high) { return Math.min(high, Math.max(low, value)); }
   function int(value, fallback) { return Math.round(finite(value, fallback)); }
@@ -168,7 +168,8 @@
     var ratio = finite(s.damageRatio !== undefined ? s.damageRatio : s.damage_ratio, 1);
     // A known zero-damage support ability remains zero. Generic profiles are added only
     // when the hero has no recovered skill metadata at all.
-    var coefficient = Number.isFinite(base) ? Math.max(0, (base + level * per) * ratio) : 0;
+    var damageSource = recordedDamageSource(s);
+    var coefficient = Number.isFinite(base) && damageSource.directBulletSupported ? Math.max(0, (base + level * per) * ratio) : 0;
     var interval = finite(s.intervalMs !== undefined ? s.intervalMs : s.attackIntervalMs, NaN) / 1000;
     if (!Number.isFinite(interval)) interval = finite(s.interval, auto ? model.autoInterval : model.activeInterval);
     var pre = finite(s.preCdMs !== undefined ? s.preCdMs : s.pre_cd, NaN) / 1000;
@@ -180,7 +181,7 @@
       coefficient: clamp(coefficient, 0, 100), damageType: s.damageType || 'physical',
       interval: clamp(interval, auto ? 0.25 : 2, auto ? 10 : 60),
       preCooldown: Number.isFinite(pre) && pre >= 0 ? pre : auto ? 0.5 : model.activeFirst,
-      targetCount: clamp(int(s.targetCount, 1), 1, 5), source: s.genericFallback ? 'generic estimated coefficient: no recovered skill metadata' : Number.isFinite(base) ? 'recovered coefficient; estimated combat application' : 'missing coefficient; ability not executed',
+      targetCount: damageSource.targetCountEvidence ? damageSource.targetCount : clamp(int(s.targetCount, 1), 1, 5), sourceDirectDamage: damageSource, fixedImpactDelayMs: recordedFixedImpactDelay(s), sourceBurst: sourceKimberlyBurst(s), source: s.genericFallback ? 'generic estimated coefficient: no recovered skill metadata' : Number.isFinite(base) ? 'recovered coefficient; estimated combat application' : 'missing coefficient; ability not executed',
       raw: s
     };
   }
@@ -274,9 +275,16 @@
     cfg.skillLevel = Math.max(1, int(cfg.skillLevel, 20)); cfg.weaponLevel = weaponLevel; cfg.awakenLevel = awakenLevel;
     cfg.gear = gearInfo.slots; cfg.role = role;
     if (cfg.skillLevels) { cfg.skillLevels = Object.assign({}, cfg.skillLevels); Object.keys(cfg.skillLevels).forEach(function (k) { cfg.skillLevels[k] = clamp(int(cfg.skillLevels[k], 1), 1, 100); }); }
+    var sourceHaste = recordedDvaHaste(hero, skills.filter(function (skill) { return !skill.locked; }), data, {});
+    if (sourceHaste) {
+      notes.push('Exact unlocked DVA weapon skills grant source five-stack haste for5s; other buffs and trigger effects remain unsupported.');
+      unsupported.forEach(function (skill) { if (skill.skillId === 501775) skill.reason = 'Source-bound opening haste applied; opening damage and other triggered mechanics remain unsupported.'; });
+    }
+    if (used.some(function (skill) { return skill.sourceBurst; })) notes.push('Kimberly weapon burst emits16source-base rockets100ms apart; first200ms offset and random targeting are modeled. Energy-stack extras, splash and moving travel remain unsupported.');
     return { heroId: Number(hero.id || cfg.heroId), name: hero.name || ('Hero ' + cfg.heroId), image: selectedMode && selectedMode.image || hero.image || '', type: troopType, role: role, form: modeName,
       level: level, effectiveLevel: level, unusedExp: xp.unusedExp, experience: xp, rankId: Number(rank.id || rankId), shardLevel: shard,
       stats: stats, baseStats: baseStats, skills: used, allSkills: skills, unsupportedSkills: unsupported, notes: notes, config: cfg,
+      recordedHaste: sourceHaste,
       gear: gearInfo.slots, gearEffects: gearInfo.applied, unsupportedGearEffects: gearInfo.unsupported,
       technology: tech, unsupportedTechnology: tech.unsupported, teamTech: { research: tech.research, squadNo: clamp(int(teamTech && teamTech.squadNo, 1), 1, 4) }, capabilities: CAPABILITIES };
   }
@@ -297,38 +305,83 @@
         initial[side].push(unit);
         if (!unit) { teams[side].push(null); continue; }
         var combatant = Object.assign({}, unit, { side: side, slot: slot, hp: prepared ? unit.initialHp : unit.stats.hp, damageDone: 0, damageTaken: 0, healingDone: 0, kills: 0 });
+        if (unit.recordedHaste) {
+          combatant.recordedHaste = Object.assign({}, unit.recordedHaste, { windows: unit.recordedHaste.windows.map(function (window) { return Object.assign({}, window); }) });
+          if (combatant.recordedHaste.windows.length) events.push({ time: 0, type: 'buff', side: side, slot: slot, skillId: 501775, buffId: 501742, amount: 0, attackSpeedRate: combatant.recordedHaste.rate, expiresAt: 5, source: 'exact recorded EW opening skill and source grant metadata' });
+        }
         teams[side].push(combatant); unsupported = unsupported.concat(unit.unsupportedSkills); notes = notes.concat(unit.notes);
         unit.skills.forEach(function (skill) { queue.push({ time: Math.max(0.1, skill.preCooldown), serial: serial++, side: side, slot: slot, skill: skill }); });
       }
     });
     function living(side) { return teams[side].filter(function (u) { return u && u.hp > 0; }); }
+    function nextInterval(actor, skill, castTime) {
+      if (!actor.recordedHaste || skill.id !== 501755 || skill.type !== 'auto') return Math.max(0.25, skill.interval);
+      var haste = actor.recordedHaste, rate = haste.initialRate + (haste.windows.some(function (window) { return window.start <= castTime && castTime < window.end; }) ? haste.rate : 0);
+      // Skill.RestartCD recomputes normal attack interval at the preceding cast.
+      // Expiry does not rewrite an already queued future start.
+      return Math.max(0.001, skill.interval / (1 + Math.max(-0.5, rate)));
+    }
     function frame(time) { var f = { time: time, left: teams.left.map(function (u) { return u ? u.hp : 0; }), right: teams.right.map(function (u) { return u ? u.hp : 0; }) }; if (frames.length && frames[frames.length - 1].time === time) frames[frames.length - 1] = f; else frames.push(f); }
     function summaries(side) { var us = teams[side].map(function (u) { return u ? { heroId: u.heroId, name: u.name, slot: u.slot, type: u.type, role: u.role, form: u.form, hp: u.hp, maxHp: u.stats.hp, stats: u.stats, alive: u.hp > 0, damageDone: u.damageDone, damageTaken: u.damageTaken, healingDone: u.healingDone, kills: u.kills } : null; }); return { units: us, totalDamage: us.reduce(function (n, u) { return n + (u ? u.damageDone : 0); }, 0), totalHealing: 0, survivors: us.filter(function (u) { return u && u.alive; }).length }; }
     frame(0); var time = 0, processed = 0, reason = 'elimination';
     if (!living('left').length || !living('right').length) { errors.push('Both sides need at least one valid hero.'); reason = 'empty-team'; }
     else while (queue.length && living('left').length && living('right').length) {
       queue.sort(function (a, b) { return a.time - b.time || a.serial - b.serial; }); var action = queue.shift();
-      if (action.time > model.maxDuration) { time = model.maxDuration; reason = 'time-limit'; break; }
-      if (processed++ >= model.maxEvents) { reason = 'event-limit'; break; }
-      time = action.time; var actor = teams[action.side][action.slot]; if (!actor || actor.hp <= 0) continue;
+      if (action.time > model.maxDuration) { queue.unshift(action); time = model.maxDuration; reason = 'time-limit'; break; }
+      if (processed++ >= model.maxEvents) { queue.unshift(action); reason = 'event-limit'; break; }
+      time = action.time; var actor = teams[action.side][action.slot], fixedImpact = action.kind === 'fixed-impact', burstEmission = action.kind === 'burst-emission';
+      if (!actor || actor.hp <= 0) {
+        if (fixedImpact) events.push({ time: Math.round(time * 1000) / 1000, type: 'impact-cancelled', side: action.side, slot: action.slot, skillId: action.skill.id, amount: 0, reason: 'caster-dead-model-assumption', targetSide: action.side === 'left' ? 'right' : 'left', targetSlots: action.targetSlots.slice(), castTime: action.castTime });
+        if (burstEmission) events.push({ time: Math.round(time * 1000) / 1000, type: 'emission-cancelled', side: action.side, slot: action.slot, skillId: action.skill.id, amount: 0, reason: 'caster-dead-model-policy; future emission omitted', burstShotIndex: action.shotIndex + 1, castTime: action.castTime });
+        continue;
+      }
       var other = action.side === 'left' ? 'right' : 'left', skill = action.skill;
+      if (!fixedImpact && !burstEmission && skill.sourceBurst) {
+        var burst = skill.sourceBurst, burstCastTime = Math.round(time * 1000) / 1000;
+        events.push({ time: burstCastTime, type: 'cast', side: action.side, slot: actor.slot, skillId: skill.id, skill: skill.name, amount: 0, targetSide: other, burstCount: burst.count, firstEmissionTime: Math.round((time + burst.firstOffsetMs / 1000) * 1000) / 1000, firstOffsetBasis: burst.firstOffsetBasis });
+        for (var shot = 0; shot < burst.count; shot++) queue.push({ kind: 'burst-emission', time: time + (burst.firstOffsetMs + shot * burst.intervalMs) / 1000, serial: serial++, side: action.side, slot: action.slot, skill: skill, castTime: burstCastTime, shotIndex: shot });
+        queue.push({ time: time + nextInterval(actor, skill, time), serial: serial++, side: action.side, slot: action.slot, skill: skill });
+        frame(burstCastTime); continue;
+      }
+      if (!fixedImpact && actor.recordedHaste && skill.id === actor.recordedHaste.activeGrantSkillId) {
+        actor.recordedHaste.windows.push({ start: time, end: time + actor.recordedHaste.duration });
+        events.push({ time: Math.round(time * 1000) / 1000, type: 'buff', side: action.side, slot: actor.slot, skillId: skill.id, buffId: 501742, amount: 0, attackSpeedRate: actor.recordedHaste.rate, expiresAt: Math.round((time + actor.recordedHaste.duration) * 1000) / 1000, source: 'modeled exact active cast; source five-stack grant, no observed outcome timing input' });
+      }
       var candidates = living(other), front = candidates.filter(function (u) { return u.slot < 2; });
-      var ordered = front.concat(candidates.filter(function (u) { return u.slot >= 2; }));
+      var ordered = fixedImpact ? action.targetSlots.map(function (slot) { return teams[other][slot]; }).filter(Boolean) : burstEmission ? (candidates.length ? [candidates[Math.floor(rand() * candidates.length)]] : []) : front.concat(candidates.filter(function (u) { return u.slot >= 2; }));
       // Randomize only within the highest-priority row; front occupants always protect back occupants.
-      if (front.length > 1 && rand() > 0.5) { var temp = ordered[0]; ordered[0] = ordered[1]; ordered[1] = temp; }
+      if (!fixedImpact && !burstEmission && front.length > 1 && rand() > 0.5) { var temp = ordered[0]; ordered[0] = ordered[1]; ordered[1] = temp; }
+      // Only the strict exact source Tesla skill/effect metadata enables this
+      // delay. Ordinary profiles also pass source form/rank/unlock selection.
+      if (!fixedImpact && skill.fixedImpactDelayMs === 200) {
+        var castTime = Math.round(time * 1000) / 1000, targetSlots = ordered.slice(0, skill.targetCount).map(function (u) { return u.slot; });
+        events.push({ time: castTime, type: 'cast', side: action.side, slot: actor.slot, skillId: skill.id, skill: skill.name, amount: 0, targetSide: other, targetSlots: targetSlots.slice(), impactTime: Math.round((time + 0.2) * 1000) / 1000, impactDelayMs: 200 });
+        queue.push({ kind: 'fixed-impact', time: time + 0.2, serial: serial++, side: action.side, slot: action.slot, skill: skill, castTime: castTime, targetSlots: targetSlots });
+        queue.push({ time: time + nextInterval(actor, skill, time), serial: serial++, side: action.side, slot: action.slot, skill: skill });
+        frame(castTime);
+        continue;
+      }
       ordered.slice(0, skill.targetCount).forEach(function (target) {
-        if (target.hp <= 0) return;
+        if (target.hp <= 0) {
+          if (fixedImpact) events.push({ time: Math.round(time * 1000) / 1000, type: 'impact-cancelled', side: action.side, slot: actor.slot, targetSide: other, targetSlot: target.slot, skillId: skill.id, amount: 0, reason: 'original-target-dead-no-retarget-model', castTime: action.castTime });
+          return;
+        }
         var crit = rand() < actor.stats.critChance;
         var raw = actor.stats.attack * actor.stats.attack / Math.max(1, actor.stats.attack + target.stats.defense * model.defenseK);
-        raw *= skill.coefficient * model.damageScale * counterFactor(actor.type, target.type, model) * (crit ? actor.stats.critMultiplier : 1);
+        var critFactor = crit ? actor.stats.critMultiplier - (prepared ? target.stats.critDamageResistance || 0 : 0) : 1;
+        raw *= skill.coefficient * model.damageScale * counterFactor(actor.type, target.type, model) * critFactor;
         var amount = Math.min(target.hp, Math.max(1, Math.round(finite(raw, 1))));
         target.hp = Math.max(0, target.hp - amount); target.damageTaken += amount; actor.damageDone += amount;
         var t = Math.round(time * 1000) / 1000;
+        if (burstEmission) events.push({ time: t, type: 'emission', side: action.side, slot: actor.slot, skillId: skill.id, amount: 0, targetSide: other, targetSlot: target.slot, castTime: action.castTime, burstShotIndex: action.shotIndex + 1, movingTravelPolicy: 'not modeled; estimated damage at emission' });
         events.push({ time: t, type: skill.type === 'auto' ? 'attack' : 'skill', side: action.side, slot: actor.slot, targetSide: other, targetSlot: target.slot, amount: amount, rawAmount: Math.max(1, Math.round(raw)), crit: crit, skill: skill.name, skillId: skill.id, hp: target.hp, targetHp: target.hp, maxHp: target.stats.hp, damageType: skill.damageType });
+        if (fixedImpact) Object.assign(events[events.length - 1], { castTime: action.castTime, impactDelayMs: 200, sourceEffectId: 5016450 });
+        if (burstEmission) Object.assign(events[events.length - 1], { castTime: action.castTime, emissionTime: t, burstShotIndex: action.shotIndex + 1, burstBaseCount: skill.sourceBurst.count, sourceBulletId: 500935, sourceDamageComponentIndex: 2, movingTravelPolicy: 'not modeled; estimated damage at emission' });
+        if (prepared && crit) Object.assign(events[events.length - 1], { initialCriticalMultiplierCandidate: critFactor, targetInitialCritDamageResistance: target.stats.critDamageResistance || 0, criticalRuleBasis: 'observational initial hero50012−target50154 candidate; dynamic buffs and server caps unresolved' });
         if (target.hp <= 0) { actor.kills += 1; events.push({ time: t, type: 'death', side: other, slot: target.slot, targetSide: other, targetSlot: target.slot, amount: 0, hp: 0, heroId: target.heroId }); }
       });
       frame(Math.round(time * 1000) / 1000);
-      queue.push({ time: time + Math.max(0.25, skill.interval), serial: serial++, side: action.side, slot: action.slot, skill: skill });
+      if (!fixedImpact && !burstEmission) queue.push({ time: time + nextInterval(actor, skill, time), serial: serial++, side: action.side, slot: action.slot, skill: skill });
     }
     if (reason !== 'empty-team' && !queue.length && living('left').length && living('right').length) reason = 'no-damaging-skills';
     var winner = reason === 'empty-team' ? 'draw' : !living('left').length && living('right').length ? 'right' : !living('right').length && living('left').length ? 'left' : 'draw';
@@ -337,7 +390,9 @@
     events.push({ time: duration, type: 'end', winner: winner, reason: reason, amount: 0 });
     return { winner: winner, duration: duration, reason: reason, events: events, frames: frames, timeline: frames, initial: initial, left: left, right: right,
       totalDamage: { left: left.totalDamage, right: right.totalDamage }, seed: input.seed === undefined ? 12345 : input.seed, model: model,
-      roles: roles, capabilities: CAPABILITIES, notes: Array.from(new Set(notes)), modelNotes: MODEL_NOTES.slice(), unsupportedSkills: unsupported, caveats: MODEL_NOTES.slice(), errors: errors };
+      roles: roles, capabilities: CAPABILITIES, notes: Array.from(new Set(notes)), modelNotes: MODEL_NOTES.slice(), unsupportedSkills: unsupported, caveats: MODEL_NOTES.slice(), errors: errors,
+      pendingImpactsAtEnd: queue.filter(function (a) { return a.kind === 'fixed-impact'; }).map(function (a) { return { side: a.side, slot: a.slot, skillId: a.skill.id, castTime: a.castTime, scheduledImpactTime: Math.round(a.time * 1000) / 1000, targetSlots: a.targetSlots.slice(), status: 'not executed before simulation termination' }; }),
+      pendingEmissionsAtEnd: queue.filter(function (a) { return a.kind === 'burst-emission'; }).map(function (a) { return { side: a.side, slot: a.slot, skillId: a.skill.id, castTime: a.castTime, scheduledEmissionTime: Math.round(a.time * 1000) / 1000, burstShotIndex: a.shotIndex + 1, status: 'not emitted before simulation termination' }; }) };
   }
   // Public setup simulation never accepts effective-stat overrides or prepared units.
   function simulate(input, data) { return runSimulation(input, data, null); }
@@ -346,7 +401,7 @@
     50014: 'HealPoint_Result: max-HP diagnostic only when integer report HP agrees',
     50015: 'PhysicalAttack_Result: model attack input', 50016: 'Hero_ATK_Result: diagnostic constituent, NOT magic attack',
     50017: 'PhysicalDefense_Result: model defense input', 50018: 'Hero_DEF_Result: diagnostic constituent, NOT magic defense',
-    50011: 'CriticalRate_Result', 50012: 'CriticalDamage_Result', 75750: 'AllCdReduceRate: recorded active cooldown rate'
+    50011: 'CriticalRate_Result', 50012: 'CriticalDamage_Result', 50154: 'Initial critical damage resistance: observational subtraction candidate, not recovered server formula', 75750: 'AllCdReduceRate: recorded active cooldown rate'
   });
   var RECORDED_INPUT_EVIDENCE = Object.freeze({
     sourceScript: 'Global/EnumType.luac', sourceSHA256: '035d2c3c4537d216e13b0a4d45a25cff178cef511f96890ec0fb5a1b50a4260a', prototype: 'root', pcBase: 0,
@@ -361,8 +416,8 @@
   });
   function recordedModelNote(note) {
     if (note.indexOf('Recovered client template/rank parameters') === 0) return 'Recorded initial HP, attack, defense and critical properties are used directly; no template, gear, technology or form stat reconstruction is performed.';
-    if (note.indexOf('Critical chance uses an assumed base') === 0) return 'Recorded critical chance and critical multiplier are retained directly without the normal setup85% chance cap; critical resistance and later buff changes are not modeled.';
-    if (note.indexOf('Only generic auto and active damage') === 0) return 'Only exact recorded auto/active damage profiles are executed with their recorded skill levels. Passives, shields, DOT, healing, support and triggered/awakening mechanics remain omitted.';
+    if (note.indexOf('Critical chance uses an assumed base') === 0) return 'Recorded critical chance and critical multiplier are retained directly without the normal setup85% chance cap; initial50154 resistance uses an observational subtraction candidate, with later critical buff changes unmodeled.';
+    if (note.indexOf('Only generic auto and active damage') === 0) return 'Only exact recorded auto/active damage profiles are executed with source-gated Bullet eligibility/counts, Tesla fixed timing, DVA haste and Kimberly source-base rockets. Most passives, shields, DOT, healing, support and triggered/awakening mechanics remain omitted.';
     return note;
   }
   function sourceSkillCatalog(hero) {
@@ -377,10 +432,62 @@
     Object.keys(hero.modes || {}).forEach(function (mode) { array(hero.modes[mode] && hero.modes[mode].skills).forEach(visit); });
     return found;
   }
+  function recordedHeroById(id, data) {
+    var playable = heroById(id, data);
+    if (playable) return playable;
+    return array(data.recordedCombatants).find(function (hero) { return Number(hero.id) === Number(id) && hero.diagnosticOnly === true && hero.playable === false && hero.sourceHeroType === 2; }) || null;
+  }
+  function recordedFixedImpactDelay(raw) {
+    // Narrow evidence gate: exact Tesla skill/effect, a source Bullet action,
+    // fixed nonmoving200ms lifetime. Other positive delays may be buffs or
+    // projectile travel and are deliberately not generalized.
+    if (Number(raw.id) !== 501645) return 0;
+    var direct = array(raw.effects).find(function (effect) { return Number(effect.id) === 5016450 && effect.pvp_actionType === 1 && effect.damage_delay === 200 && effect.horizontal_speed === 0; });
+    return direct ? 200 : 0;
+  }
+  function recordedDamageSource(raw) {
+    var effects = array(raw.effects), reviewed = Array.isArray(raw.effectIds) || effects.some(function (effect) { return Number.isInteger(effect.pvp_actionType); });
+    var direct = effects.filter(function (effect) { return effect.pvp_actionType === 1 && Number.isInteger(effect.pvp_bullet) && effect.pvp_bullet > 0; });
+    var count = 1, countEvidence = null;
+    if (direct.length === 1) {
+      var effect = direct[0], scalar = String(effect.pvp_pos_num === null || effect.pvp_pos_num === undefined ? '' : effect.pvp_pos_num);
+      if (/^[1-5]$/.test(scalar) && array(effect.target_type).length === 1 && effect.target_type[0] === 0 && /^(4|10|14)$/.test(String(effect.pvp_pos_condition)) && !effect.pvp_pos_num_buff && String(effect.pvp_troop_condition) === '0' && String(effect.pvp_other_condition) === '0' && effect.pvp_cast_count === 1 && !effect.pvp_cast_interval && !effect.pvp_cast_first_interval) {
+        count = Number(scalar); countEvidence = { effectId: effect.id, count: count, positionCondition: effect.pvp_pos_condition, sourceField: 'pvp_pos_num', selectionPolicy: 'source count only; exact positional/random target selection remains estimated front-row priority' };
+      }
+    }
+    return { reviewed: reviewed, directBulletSupported: !reviewed || direct.length > 0, directEffectIds: direct.map(function (effect) { return effect.id; }), targetCount: count, targetCountEvidence: countEvidence };
+  }
+  function sourceKimberlyBurst(raw) {
+    if (!Number.isInteger(raw.id) || raw.id < 500950 || raw.id > 500955 || raw.descriptionKey !== 'hero_equip_skill_desc_500950' || !Array.isArray(raw.damageComponents) || raw.damageComponents.length < 2) return null;
+    var component = raw.damageComponents[1];
+    if (!component || component.base !== 0.614 || component.perLevel !== 0.023 || raw.damageRatio !== 2.2 || raw.base !== component.base || raw.perLevel !== component.perLevel || Math.abs(component.base * raw.damageRatio - 1.3508) > 1e-12 || Math.abs(component.perLevel * raw.damageRatio - 0.0506) > 1e-12) return null;
+    var effects = array(raw.effects), effect = effects.length === 1 ? effects[0] : null;
+    if (!effect || effect.id !== raw.id * 10 || effect.pvp_actionType !== 1 || effect.pvp_bullet !== 500935 || effect.pvp_cast_count !== 16 || String(effect.pvp_cast_interval) !== '100' || effect.pvp_cast_first_interval !== null || effect.pvp_cast_count_buff !== '500940|1' || String(effect.pvp_pos_condition) !== '4' || String(effect.pvp_pos_num) !== '1' || array(effect.target_type).length !== 1 || effect.target_type[0] !== 0) return null;
+    return { count: 16, intervalMs: 100, firstOffsetMs: 200, firstOffsetBasis: 'empirical observed first-emission offset; source fallback not recovered', damageComponentIndex: 2, bulletId: 500935,
+      sourceCoefficient: 'per rocket:2.2×(component2.base+skillLevel×component2.perLevel); independently agrees with localized description parameters',
+      targetPolicy: 'modeled uniform living enemy hero per emission; source says one random enemy, RNG weights/support eligibility unknown',
+      limitations: 'Only16source-base rockets; energy-stack extra count, nearby splash, moving projectile travel, interruption details and other modifiers remain unsupported.' };
+  }
+  function recordedDvaHaste(hero, profiles, data, effects) {
+    if (Number(hero.id) !== 50017 || !profiles.some(function (profile) { return profile.id === 501755 && profile.type === 'auto'; })) return null;
+    var buff = data.recordedBuffs && data.recordedBuffs[501742];
+    if (!buff || buff.id !== 501742 || buff.diagnosticOnly !== true || buff.type !== 1 || buff.para !== '75650;0.2;0' || buff.additive_type !== 2 || buff.max_level !== 5 || !Array.isArray(buff.buff_time) || buff.buff_time[0] !== 5000 || buff.buff_time[1] !== 0) return null;
+    function grant(skillId) {
+      var profile = profiles.find(function (candidate) { return candidate.id === skillId; });
+      return profile && array(profile.raw.effects).some(function (effect) { return effect.id === skillId * 10 && effect.pvp_actionType === 1 && String(effect.pvp_buff_condition) === '4' && String(effect.pvp_buff_ID) === '501742' && String(effect.pvp_buff_level) === '5' && !effect.pvp_buff_level_special; });
+    }
+    var opening = grant(501775), active = grant(501765);
+    if (!opening && !active) return null;
+    var initialRate = effects[75650] === undefined ? 0 : effects[75650];
+    return { buffId: 501742, propertyId: 75650, duration: 5, rate: 5 * 0.2, initialRate: initialRate, activeGrantSkillId: active ? 501765 : null, windows: opening ? [{ start: 0, end: 5 }] : [],
+      source: 'exactDVA501755 with source-bound501775 opening and/or501765 active five-stack501742 grant; no inferred weapon level or awakening requirement',
+      limitations: 'Five-stack windows only; general buff stacking, service-specific caps, dispel/interruption, other attack-speed sources and same-time priority remain unsupported.' };
+  }
   function recordedSkillProfile(raw, info, activeCooldownRate) {
     var type = String(raw.type || '').toLowerCase(), auto = /auto|normal|basic/.test(type), passive = /passive|expertise|talent|buff|support/.test(type);
     var coefficientAvailable = typeof raw.base === 'number' && Number.isFinite(raw.base) && typeof raw.perLevel === 'number' && Number.isFinite(raw.perLevel) && typeof raw.damageRatio === 'number' && Number.isFinite(raw.damageRatio);
-    var coefficient = coefficientAvailable ? (raw.base + info.skillLv * raw.perLevel) * raw.damageRatio : 0;
+    var damageSource = recordedDamageSource(raw);
+    var coefficient = coefficientAvailable && damageSource.directBulletSupported ? (raw.base + info.skillLv * raw.perLevel) * raw.damageRatio : 0;
     var delays = array(raw.effects).filter(function (e) { return typeof e.damage_delay === 'number' && Number.isFinite(e.damage_delay) && e.damage_delay > 0; }).map(function (e) {
       return { effectId: e.id, damageDelayMs: e.damage_delay, horizontalSpeed: typeof e.horizontal_speed === 'number' ? e.horizontal_speed : null };
     });
@@ -401,8 +508,9 @@
       recordedLevelAboveSnapshotCap: info.skillLv > (raw.maxLevel || 1), locked: false,
       coefficient: coefficient, coefficientAvailable: coefficientAvailable, damageType: raw.damageType || 'physical',
       interval: intervalMs / 1000, preCooldown: preCdMs / 1000, recordedCooldownAdjustment: cooldown,
-      targetCount: 1, source: 'exact recorded skill ID and level; recovered snapshot coefficient; estimated application',
-      sourceDamageDelays: delays, modelImpactPolicy: 'immediate scheduled attack; recovered delay not executed', raw: raw
+      targetCount: damageSource.targetCount, sourceDirectDamage: damageSource, source: 'exact recorded skill ID and level; recovered snapshot coefficient; estimated application',
+      sourceDamageDelays: delays, fixedImpactDelayMs: recordedFixedImpactDelay(raw), sourceBurst: sourceKimberlyBurst(raw),
+      modelImpactPolicy: recordedFixedImpactDelay(raw) ? 'source-fixed Tesla200ms; cast target locked; caster-death cancellation and impact-time rolls are explicit model assumptions' : 'immediate scheduled attack; other recovered delays not executed', raw: raw
     };
   }
   /**
@@ -412,17 +520,25 @@
    */
   function simulateRecordedSnapshot(battle, data, modelInput) {
     data = data || {}; modelInput = modelInput || {};
-    var errors = [], warnings = [], omitted = [], bindings = [], supportedDelays = [], cooldowns = [], prepared = { left: [null, null, null, null, null], right: [null, null, null, null, null] };
-    var observations = [], seenSlots = {}, modeled = 0, explicitRole = modelInput.attackerSide === 'left' || modelInput.attackerSide === 'right';
+    var errors = [], warnings = [], omitted = [], bindings = [], supportedDelays = [], appliedDelays = [], cooldowns = [], targetCounts = [], nonDamageSource = [], prepared = { left: [null, null, null, null, null], right: [null, null, null, null, null] };
+    var observations = [], seenSlots = {}, modeled = 0, inactive = [], dvaHaste = [], sourceBursts = [], explicitRole = modelInput.attackerSide === 'left' || modelInput.attackerSide === 'right';
     var diagnostics = {
       mode: 'recorded-effective-hero-snapshot', inputReconstruction: 'not performed; explicit report values used',
       effectiveMapping: RECORDED_EFFECT_MAPPING, mappingEvidence: RECORDED_INPUT_EVIDENCE, damageModelRecalibrated: false,
       separateMagicChannels: false, omittedUnits: omitted, sourceUnits: bindings,
-      warnings: warnings, omittedImpactDelays: supportedDelays, fullBattleMechanicsSupported: false,
+      warnings: warnings, omittedImpactDelays: supportedDelays, appliedImpactDelays: appliedDelays, fullBattleMechanicsSupported: false,
+      fixedImpactTiming: { scope: 'exactTesla501645/effect5016450 only', delayMs: 200, targetPolicy: 'lock modeled target at cast; omit if dead at impact; no retarget', casterDeathPolicy: 'cancel pending impact: unverified modeling assumption', damageStatePolicy: 'estimated damage and critical RNG evaluated at impact using modeled stats; cast-versus-impact snapshot semantics unresolved', evidence: { source: 'SkillEffectPvp.luac', sha256: '0787190520d851dfc323425eb8a02c943be1c48025761404fbf02544bc45ed90', functions: ['ForceLifeTime root.16 PCs1–8', 'GetForceLifeTime root.17 PCs3–10'], observations: '157Tesla impacts across16recordings match200ms; one original target dies before expected impact with no matched outcome; no Tesla caster-death interval observed' } },
       recordedActiveCooldownAdjustments: cooldowns,
+      inactiveZeroHpUnits: inactive,
+      sourceBoundTargetCounts: targetCounts, excludedNonBulletDamageProfiles: nonDamageSource,
+      sourceBoundDvaHaste: dvaHaste,
+      sourceBoundBaseBursts: sourceBursts,
+      initialCriticalResistance: { effectId: 50154, rule: 'initial caster50012−target50154 for critical hero hits', basis: 'observational candidate supported by controlled same-state pairs; not an extracted server formula', domain: 'strictly positive opposing live-hero factors only; no guessed floor or cap', dynamicCriticalBuffsApplied: false },
       limitations: ['Hero-only projection: UAV, Dominator, pets and other support units omitted.', 'Buffs, DOT, shields, healing, penetration, critical resistance and triggered/awakening mechanics remain unsupported.',
         'Reported effective values describe initial inputs, not every later buff state.', 'Exact skill IDs/levels are joined to a historical snapshot; schema version does not prove matching gameplay configuration.',
-        'One auto and one active damage profile per hero are modeled; no generic skills or reconstructed gear/research are inserted.', 'Source damage delays are recorded as diagnostics; target/cancellation policy remains unresolved.']
+        'One auto and one active damage profile per hero are modeled; no generic skills or reconstructed gear/research are inserted.', 'Only exactTesla501645/effect5016450 separates cast and impact by source-fixed200ms. Other fixed or moving delays remain omitted.',
+        'Tesla targets are locked at model cast; dead targets are not replaced. Cancel-on-caster-death and impact-time stat/RNG evaluation are explicit modeling assumptions, not proven server rules.',
+        'Critical hero hits use initial caster50012−target50154 as an observational positive-domain candidate; dynamic critical buffs, caps and nonpositive-domain rules remain unresolved.']
     };
     function fail(path, message) { errors.push({ path: path, message: message }); }
     function number(value) { return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER; }
@@ -435,8 +551,26 @@
       if (rawUnit.unitType !== 1) { omitted.push({ index: number(rawUnit.index) ? rawUnit.index : null, unitType: number(rawUnit.unitType) ? rawUnit.unitType : null, reason: 'Support/non-hero mechanics are not synthesized.' }); return; }
       if (!Number.isInteger(rawUnit.index) || rawUnit.index < 1 || rawUnit.index > 10) { fail(path + '.index', 'Hero index must be an integer in 1..10.'); return; }
       if (seenSlots[rawUnit.index]) { fail(path + '.index', 'Duplicate hero index.'); return; } seenSlots[rawUnit.index] = true;
-      var hero = Number.isInteger(rawUnit.heroId) ? heroById(rawUnit.heroId, data) : null;
+      var hero = Number.isInteger(rawUnit.heroId) ? recordedHeroById(rawUnit.heroId, data) : null;
       if (!hero) { fail(path + '.heroId', 'Exact hero definition is unavailable; generic fallback is prohibited.'); return; }
+      // Proto3 may contain a known hero slot with explicit zero max/start/endHP,
+      // no effective properties and no activity statistics. Keep this as an
+      // inactive structural record, never inventing live combat stats/attacks.
+      var zeroStats = rawUnit.stat === undefined || rawUnit.stat && typeof rawUnit.stat === 'object' && Object.keys(rawUnit.stat).every(function (key) { var value = rawUnit.stat[key]; return typeof value === 'number' && value === 0 || Array.isArray(value) && value.length === 0; });
+      var zeroProfile = rawUnit.maxHp === 0 && rawUnit.hpBeforeStart === 0 && (rawUnit.hp === undefined || rawUnit.hp === 0) && Array.isArray(rawUnit.effects) && rawUnit.effects.length === 0 && zeroStats && (rawUnit.damage === undefined || rawUnit.damage === 0);
+      if (zeroProfile) {
+        var emptyCatalog = sourceSkillCatalog(hero), infos = rawUnit.skillInfos;
+        if (!Number.isInteger(rawUnit.heroLevel) || rawUnit.heroLevel < 1 || !Array.isArray(infos) || !infos.every(function (info) { return info && Number.isSafeInteger(info.skillId) && Number.isSafeInteger(info.skillLv) && info.skillLv > 0 && info.skillLv <= 1000 && emptyCatalog[info.skillId]; })) { fail(path, 'Inactive zero-HP slot still requires an exact known hero and valid source-bound skill metadata.'); return; }
+        var suppliedActions = Array.isArray(battle.actions) ? battle.actions : battle.detail && Array.isArray(battle.detail.actions) ? battle.detail.actions : [];
+        if (suppliedActions.some(function (action) { return action.casterIndex === rawUnit.index || array(action.targets).some(function (target) { return target.index === rawUnit.index; }); })) { fail(path, 'Inactive zero-HP record has observed action activity; unsupported input.'); return; }
+        var zeroSide = rawUnit.index <= 5 ? 'left' : 'right', zeroSlot = (rawUnit.index - 1) % 5;
+        prepared[zeroSide][zeroSlot] = { heroId: rawUnit.heroId, name: hero.name || ('Hero ' + rawUnit.heroId), image: hero.image || '', type: typeName(hero.type), role: 'unknown', form: 'recorded', level: rawUnit.heroLevel, initialHp: 0, inactive: true, statsKnown: false,
+          stats: { hp: 0, attack: null, defense: null, critChance: null, critMultiplier: null }, skills: [], allSkills: [], unsupportedSkills: [], notes: ['Inactive explicit zero-HP record: unknown combat stats remain null; no skills queued.'], config: { heroId: rawUnit.heroId, level: rawUnit.heroLevel, form: 'recorded' } };
+        inactive.push({ index: rawUnit.index, heroId: rawUnit.heroId, basis: 'explicit zero maxHp/startHp, zero endingHp, empty effective properties and zero/empty activity stats; no live stats inferred' });
+        bindings.push({ index: rawUnit.index, heroId: rawUnit.heroId, inactive: true, skillIds: infos.map(function (info) { return info.skillId; }), requiredEffects: null, hpSource: 'explicit proto3 zero HP', maxHp: 0, startingHp: 0 });
+        observations.push({ side: zeroSide, slot: zeroSlot, index: rawUnit.index, heroId: rawUnit.heroId, startingHp: 0, endingHp: 0, endingHpFieldPresent: rawUnit.hp !== undefined, damage: 0, injured: 0, critDamage: 0, critNum: 0, inactive: true });
+        return;
+      }
       if (!Number.isInteger(rawUnit.heroLevel) || rawUnit.heroLevel < 1) fail(path + '.heroLevel', 'Recorded hero level must be a positive integer.');
       if (!number(rawUnit.maxHp) || rawUnit.maxHp <= 0) fail(path + '.maxHp', 'Positive numeric report maxHp is required.');
       if (!number(rawUnit.hpBeforeStart) || rawUnit.hpBeforeStart < 0 || rawUnit.hpBeforeStart > rawUnit.maxHp) fail(path + '.hpBeforeStart', 'Numeric starting HP must lie in [0,maxHp].');
@@ -478,6 +612,7 @@
           fail(spath, 'Damage-profile coefficient metadata is incomplete or invalid.'); return;
         }
         var profile = recordedSkillProfile(source, info, effects[75750]);
+        if (profile.sourceDirectDamage.reviewed && !profile.sourceDirectDamage.directBulletSupported) nonDamageSource.push({ index: rawUnit.index, skillId: info.skillId, reason: 'Recovered PvP effects have no positive Bullet action; positive coefficient alone is not executed as direct damage.' });
         if (!number(profile.coefficient) || profile.coefficient < 0) { fail(spath, 'Coefficient arithmetic is not finite.'); return; }
         if (damageCandidate && profile.coefficient > 0 && (!number(source.intervalMs) || source.intervalMs <= 0 || !number(source.preCdMs) || source.preCdMs < 0)) {
           fail(spath, 'Positive damage-profile scheduling metadata is incomplete or invalid.'); return;
@@ -490,22 +625,28 @@
       var autos = profiles.filter(function (p) { return p.type === 'auto' && p.coefficient > 0; }), actives = profiles.filter(function (p) { return p.type === 'active' && p.coefficient > 0; });
       if (!autos.length) fail(path + '.skillInfos', 'No exact supported positive auto-attack profile; no generic auto inserted.');
       var used = [autos[0], actives[0]].filter(Boolean), unsupported = profiles.filter(function (p) { return used.indexOf(p) < 0; }).map(function (p) {
-        return { heroId: rawUnit.heroId, skillId: p.id, groupId: p.groupId, name: p.name, level: p.level, reason: p.coefficient <= 0 ? 'Non-damaging recorded ability is not replaced by invented damage.' : 'Recorded passive/triggered/extra ability mechanics remain unsupported.' };
+        return { heroId: rawUnit.heroId, skillId: p.id, groupId: p.groupId, name: p.name, level: p.level, reason: p.sourceDirectDamage.reviewed && !p.sourceDirectDamage.directBulletSupported ? 'Source PvP effects contain no positive Bullet action; buff-only metadata is not executed as direct damage.' : p.coefficient <= 0 ? 'Non-damaging recorded ability is not replaced by invented damage.' : 'Recorded passive/triggered/extra ability mechanics remain unsupported.' };
       });
       used.forEach(function (p) {
-        p.sourceDamageDelays.forEach(function (delay) { supportedDelays.push(Object.assign({ index: rawUnit.index, skillId: p.id }, delay)); });
+        p.sourceDamageDelays.forEach(function (delay) { (p.fixedImpactDelayMs && delay.effectId === 5016450 ? appliedDelays : supportedDelays).push(Object.assign({ index: rawUnit.index, skillId: p.id }, delay)); });
         if (p.recordedCooldownAdjustment) cooldowns.push(Object.assign({ index: rawUnit.index, skillId: p.id }, p.recordedCooldownAdjustment));
+        if (p.sourceDirectDamage.targetCountEvidence) targetCounts.push(Object.assign({ index: rawUnit.index, skillId: p.id }, p.sourceDirectDamage.targetCountEvidence));
+        if (p.sourceBurst) sourceBursts.push(Object.assign({ index: rawUnit.index, skillId: p.id }, p.sourceBurst));
       });
       var side = rawUnit.index <= 5 ? 'left' : 'right', slot = (rawUnit.index - 1) % 5;
+      var haste = recordedDvaHaste(hero, profiles, data, effects);
+      if (haste) dvaHaste.push({ index: rawUnit.index, autoSkillId: 501755, openingGrant: haste.windows.length > 0, activeGrantSkillId: haste.activeGrantSkillId, buffId: 501742, rate: haste.rate, durationMs: 5000, initialRate: haste.initialRate, source: haste.source, limitations: haste.limitations });
+      if (haste) unsupported.forEach(function (skill) { if (skill.skillId === 501775) skill.reason = 'Source-bound opening haste applied; opening damage and other triggered mechanics remain unsupported.'; });
       var role = explicitRole ? modelInput.attackerSide === side ? 'attacker' : 'defender' : 'unknown';
-      var binding = { index: rawUnit.index, heroId: rawUnit.heroId, skillIds: profiles.map(function (p) { return p.id; }),
+      var binding = { index: rawUnit.index, heroId: rawUnit.heroId, sourceClassification: hero.diagnosticOnly && hero.playable === false ? 'source-bound diagnostic NPC, not playable roster' : 'playable hero definition', skillIds: profiles.map(function (p) { return p.id; }),
         requiredEffects: { 50015: effects[50015], 50017: effects[50017], 50011: effects[50011], 50012: effects[50012] },
         hpSource: hpSource, maxHp: number(maxHp) ? maxHp : null, startingHp: number(startingHp) ? startingHp : null,
         constituentsOnly: { Hero_ATK_Result_50016: effects[50016] === undefined ? null : effects[50016], Hero_DEF_Result_50018: effects[50018] === undefined ? null : effects[50018] } };
       bindings.push(binding); modeled += 1;
       prepared[side][slot] = { heroId: rawUnit.heroId, name: hero.name || ('Hero ' + rawUnit.heroId), image: hero.image || '', type: typeName(hero.type || hero.unitType), role: role, form: 'recorded',
         level: rawUnit.heroLevel, effectiveLevel: rawUnit.heroLevel, unusedExp: 0, rankId: Number.isInteger(rawUnit.rankLv) ? rawUnit.rankLv : null,
-        stats: { hp: maxHp, attack: effects[50015], defense: effects[50017], critChance: effects[50011], critMultiplier: effects[50012] }, initialHp: startingHp,
+        stats: { hp: maxHp, attack: effects[50015], defense: effects[50017], critChance: effects[50011], critMultiplier: effects[50012], critDamageResistance: effects[50154] === undefined ? 0 : effects[50154] }, initialHp: startingHp,
+        recordedHaste: haste,
         skills: used, allSkills: profiles, unsupportedSkills: unsupported,
         notes: ['Explicit recorded effective stats, exact skill IDs and recorded levels; no setup stats, gear, technology or form bonuses were synthesized.'],
         config: { heroId: rawUnit.heroId, recorded: true }, sourceBinding: binding,
@@ -521,6 +662,15 @@
     var sourceHash = battle.sourceSHA256 || battle.sourceDecodedSHA256 || battle.decodedSHA256 || battle.sourceBinding && (battle.sourceBinding.sourceSHA256 || battle.sourceBinding.sha256);
     diagnostics.sourceBinding = { decodedSHA256: typeof sourceHash === 'string' && /^[a-f0-9]{64}$/i.test(sourceHash) ? sourceHash : null,
       reportVersion: Number.isInteger(battle.version) ? battle.version : null, configurationMatchProven: false, unitOrder: 'report indices1..5 and6..10 are view sides, not inferred attacker/defender' };
+    var criticalFactors = [];
+    ['left','right'].forEach(function (side) { var other = side === 'left' ? 'right' : 'left'; prepared[side].filter(function (unit) { return unit && unit.initialHp > 0; }).forEach(function (actor) { prepared[other].filter(function (unit) { return unit && unit.initialHp > 0; }).forEach(function (target) {
+      var factor = actor.stats.critMultiplier - (target.stats.critDamageResistance || 0);
+      if (!(factor > 0) || !number(factor)) fail('criticalDomain', 'Initial opposing hero critical factor must be positive; no server floor/cap is guessed outside the observational domain.');
+      else criticalFactors.push(factor);
+    }); }); });
+    diagnostics.initialCriticalResistance.potentialOpposingPairs = criticalFactors.length;
+    diagnostics.initialCriticalResistance.minimumPositiveFactor = criticalFactors.length ? Math.min.apply(null,criticalFactors) : null;
+    diagnostics.initialCriticalResistance.maximumPositiveFactor = criticalFactors.length ? Math.max.apply(null,criticalFactors) : null;
     if (errors.length) return { ok: false, errors: errors, diagnostics: diagnostics };
     var result = runSimulation({ seed: modelInput.seed, attackerSide: modelInput.attackerSide, model: modelInput }, data, prepared);
     var survivingLeft = observations.filter(function (u) { return u.side === 'left' && u.endingHp > 0; }).length;
@@ -532,13 +682,16 @@
     if (!explicitRole) result.roles = { left: 'unknown', right: 'unknown', attackerSide: null, defenderSide: null };
     result.modelNotes = MODEL_NOTES.map(recordedModelNote); result.caveats = result.modelNotes.slice();
     result.modelNotes.push('Recorded active cooldowns use source division by1+max(effect75750,-0.5); millisecond flooring matches these observations and is an explicit quantization assumption.');
+    if (appliedDelays.length) result.modelNotes.push('ExactTesla501645 impacts use source-fixed200ms after model cast; original targets stay locked. Caster-death cancellation and impact-time RNG/stat evaluation remain unverified model assumptions.');
+    if (dvaHaste.length) result.modelNotes.push('ExactDVA501755 uses source501742 five-stack haste windows from recorded501775 opening and modeled501765 active casts. Initial pre-CD stays unchanged; each later gap uses source interval/(1+rate). Other buff stacking, interruption and dispel mechanics remain omitted.');
+    if (sourceBursts.length) result.modelNotes.push('Kimberly exact weapon active500950–500955 emits16source-base rockets100ms apart with verified per-rocket component2 coefficient. First200ms offset is empirical; extra energy-stack rockets, splash and moving travel are unmodeled.');
     result.caveats = result.modelNotes.slice();
     result.notes = Array.from(new Set(result.notes.map(recordedModelNote).concat(diagnostics.limitations)));
     if (cooldowns.length) result.notes.push('Recorded active cooldown rates are applied with the source lower bound-0.5 and observed whole-millisecond quantization; ordinary setup timing is unchanged.');
-    result.capabilities = Object.assign({}, CAPABILITIES, { inputMode: 'recorded-effective-snapshot', gear: 'not reconstructed', technology: 'not reconstructed', criticalInputs: 'recorded without setup cap' });
+    result.capabilities = Object.assign({}, CAPABILITIES, { inputMode: 'recorded-effective-snapshot', gear: 'not reconstructed', technology: 'not reconstructed', criticalInputs: 'recorded without setup cap; initial50154 subtraction is observational and positive-domain only', fixedImpactTiming: 'source-fixedTesla501645/5016450:200ms only; cancellation policy unverified', targetCount: 'single source Bullet effect with scalar1..5 enemy count and no dynamic/repeated modifiers; exact target selection still estimated', directDamageEligibility: 'positive coefficient plus source Bullet action required when reviewed effect metadata is available', attackSpeedBuffs: 'exactDVA501755/source501742 five-stack opening and active haste windows only; general buff solver unavailable', burstMechanics: 'Kimberly500950–500955:16source-base rockets/100ms; empirical200msfirstoffset; no energy-stack count, splash or moving travel' });
     return result;
   }
-  return { version: '0.3.1-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
+  return { version: '0.3.5-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
     computeUnit: computeUnit, resolveExperience: resolveExperience, simulate: simulate, simulateRecordedSnapshot: simulateRecordedSnapshot,
     recordedEffectMapping: RECORDED_EFFECT_MAPPING, recordedInputEvidence: RECORDED_INPUT_EVIDENCE,
     equipmentSelection: equipmentSelection, technologyModifiers: technologyModifiers };
