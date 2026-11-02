@@ -45,4 +45,24 @@ pl:['Testuj zapisane statystyki','Używa zapisanych statystyk początkowych i po
 for(const [lang,row] of Object.entries(snapshot))['testSnapshot','snapshotNote','invalidSnapshot'].forEach((key,i)=>window.REPLAY_I18N[lang][key]=row[i]);
 const boundary={en:'Run stops at the recorded observation boundary; matching duration is imposed, not validated.',zh_CN:'运行在战报观察边界停止；相同时长由限制设定，并非验证结果。',zh_TW:'執行在戰報觀察邊界停止；相同時長由限制設定，並非驗證結果。',ja:'記録の観測範囲で停止します。時間の一致は設定によるもので、検証結果ではありません。',ko:'기록의 관측 경계에서 중단합니다. 동일한 시간은 설정된 제한이며 검증 결과가 아닙니다.',de:'Der Lauf endet an der aufgezeichneten Beobachtungsgrenze; gleiche Dauer ist vorgegeben, nicht validiert.',fr:'L’exécution s’arrête à la limite observée ; la durée identique est imposée, pas validée.',es:'La ejecución termina en el límite observado; la duración coincidente es impuesta, no validada.',pt:'A execução termina no limite observado; a duração igual é imposta, não validada.',ru:'Прогон завершается на границе записи; совпадение длительности задано ограничением, а не подтверждено.',ar:'يتوقف التشغيل عند حد الملاحظة المسجلة؛ تطابق المدة مفروض وليس نتيجة تحقق.',it:'La prova termina al limite osservato; la durata uguale è imposta, non convalidata.',id:'Pengujian berhenti pada batas pengamatan rekaman; durasi yang sama ditetapkan, bukan hasil validasi.',tr:'Çalışma kayıtlı gözlem sınırında durur; eşleşen süre zorunlu sınırdır, doğrulanmış sonuç değildir.',th:'การทดสอบหยุดที่ขอบเขตการบันทึก ระยะเวลาที่เท่ากันเป็นข้อจำกัดที่กำหนด ไม่ใช่ผลการตรวจสอบ',vi:'Lần chạy dừng tại giới hạn quan sát đã ghi; thời lượng trùng là giới hạn áp đặt, không phải kết quả xác thực.',pl:'Próba kończy się na granicy zapisu; zgodny czas jest narzucony, a nie zweryfikowany.'};
 for(const [lang,text] of Object.entries(boundary))window.REPLAY_I18N[lang].snapshotNote+=' '+text;
+const supportDamageNotes={
+en:'Recorded damage uses report totals; raw hits can include overkill. Supported Overlords are compared separately. UAV and unsupported units have no modeled counterpart.',
+zh_CN:'记录伤害采用战报总计；原始命中可能包含溢出伤害。已支持的霸主单独比较。无人机及未支持单位没有模型对应项。',
+zh_TW:'記錄傷害採用戰報總計；原始命中可能包含溢出傷害。已支援的霸主單獨比較。無人機及未支援單位沒有模型對應項。',
+ja:'記録ダメージは報告の合計値です。個別命中には過剰ダメージが含まれる場合があります。対応済みオーバーロードは別に比較します。ドローンと未対応ユニットのモデル値はありません。',
+ko:'기록 피해는 보고서 합계입니다. 개별 타격에는 초과 피해가 포함될 수 있습니다. 지원되는 오버로드는 별도로 비교합니다. 드론과 미지원 유닛에는 모델 값이 없습니다.',
+de:'Aufgezeichneter Schaden nutzt Berichtssummen; Einzeltreffer können Überkill enthalten. Unterstützte Overlords werden separat verglichen. Drohnen und nicht unterstützte Einheiten haben kein Modellgegenstück.',
+fr:'Les dégâts enregistrés utilisent les totaux du rapport ; les coups bruts peuvent inclure du surdégât. Les Overlords pris en charge sont comparés séparément. Les drones et unités non pris en charge n’ont pas de modèle.',
+es:'El daño registrado usa los totales del informe; los golpes brutos pueden incluir daño excesivo. Los Overlords compatibles se comparan por separado. Los drones y unidades no compatibles no tienen modelo.',
+pt:'O dano registrado usa os totais do relatório; golpes brutos podem incluir dano excedente. Overlords compatíveis são comparados separadamente. Drones e unidades não compatíveis não têm modelo.',
+ru:'Записанный урон берётся из итогов отчёта; отдельные удары могут включать избыточный урон. Поддерживаемые повелители сравниваются отдельно. Дроны и неподдерживаемые бойцы не моделируются.',
+ar:'الضرر المسجل من إجماليات التقرير؛ قد تشمل الضربات الخام ضرراً زائداً. تتم مقارنة الأوفرلورد المدعومين بصورة منفصلة. لا يوجد نموذج للطائرات المسيّرة والوحدات غير المدعومة.',
+it:'Il danno registrato usa i totali del rapporto; i colpi grezzi possono includere danno eccessivo. Gli Overlord supportati si confrontano separatamente. Droni e unità non supportate non hanno un modello.',
+id:'Kerusakan rekaman memakai total laporan; hit mentah bisa mencakup kerusakan berlebih. Overlord yang didukung dibandingkan terpisah. Drone dan unit yang belum didukung tidak memiliki model.',
+tr:'Kayıtlı hasar rapor toplamlarını kullanır; ham vuruşlar fazla hasar içerebilir. Desteklenen Overlord birimleri ayrı karşılaştırılır. İHA ve desteklenmeyen birimlerin model karşılığı yoktur.',
+th:'ความเสียหายที่บันทึกใช้ยอดรวมในรายงาน การโจมตีดิบอาจมีความเสียหายเกินพลังชีวิต เปรียบเทียบโอเวอร์ลอร์ดที่รองรับแยกต่างหาก โดรนและหน่วยที่ยังไม่รองรับไม่มีค่าจำลอง',
+vi:'Sát thương ghi nhận dùng tổng trong báo cáo; đòn đánh thô có thể gồm sát thương dư. Overlord được hỗ trợ được so sánh riêng. Drone và đơn vị chưa hỗ trợ không có mô hình.',
+pl:'Zapisane obrażenia pochodzą z sum raportu; surowe trafienia mogą zawierać nadmiar obrażeń. Obsługiwani Overlordowie są porównywani osobno. Drony i nieobsługiwane jednostki nie mają modelu.'
+};
+for(const [lang,text] of Object.entries(supportDamageNotes))window.REPLAY_I18N[lang].damageNote=text;
 })();
