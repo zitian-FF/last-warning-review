@@ -346,13 +346,17 @@
     50014: 'HealPoint_Result: max-HP diagnostic only when integer report HP agrees',
     50015: 'PhysicalAttack_Result: model attack input', 50016: 'Hero_ATK_Result: diagnostic constituent, NOT magic attack',
     50017: 'PhysicalDefense_Result: model defense input', 50018: 'Hero_DEF_Result: diagnostic constituent, NOT magic defense',
-    50011: 'CriticalRate_Result', 50012: 'CriticalDamage_Result'
+    50011: 'CriticalRate_Result', 50012: 'CriticalDamage_Result', 75750: 'AllCdReduceRate: recorded active cooldown rate'
   });
   var RECORDED_INPUT_EVIDENCE = Object.freeze({
     sourceScript: 'Global/EnumType.luac', sourceSHA256: '035d2c3c4537d216e13b0a4d45a25cff178cef511f96890ec0fb5a1b50a4260a', prototype: 'root', pcBase: 0,
     assignments: { 50011: { name: 'CriticalRate_Result', pc: 35575 }, 50012: { name: 'CriticalDamage_Result', pc: 35578 },
       50014: { name: 'HealPoint_Result', pc: 35584 }, 50015: { name: 'PhysicalAttack_Result', pc: 35587 }, 50016: { name: 'Hero_ATK_Result', pc: 35590 },
       50017: { name: 'PhysicalDefense_Result', pc: 35593 }, 50018: { name: 'Hero_DEF_Result', pc: 35596 } },
+    cooldownConsumer: { sourceScript: 'Scene/LWBattle/PVP/SkillPVP.luac', sourceSHA256: '078639c79f1d8b4652ff1a5ead9d157d17c94f2bd9a7c0f3115950e6e068dc70',
+      initialCooldown: { prototype: 'root.0', pcs: [44, 70] }, repeatedCooldown: { prototype: 'root.11', pcs: [10, 37] },
+      sourceOperation: 'raw milliseconds / (1 + max(rate, -0.5)); AllCdReduceRate for non-normal attacks',
+      quantization: 'Floor to milliseconds matches observed active starts/gaps in R2 and R3; not claimed as a universal official rounding rule.' },
     scope: 'Literal source names; no source-backed independent magic channel mapping. Float HP restoration additionally requires report integer agreement.'
   });
   function recordedModelNote(note) {
@@ -373,21 +377,30 @@
     Object.keys(hero.modes || {}).forEach(function (mode) { array(hero.modes[mode] && hero.modes[mode].skills).forEach(visit); });
     return found;
   }
-  function recordedSkillProfile(raw, info) {
+  function recordedSkillProfile(raw, info, activeCooldownRate) {
     var type = String(raw.type || '').toLowerCase(), auto = /auto|normal|basic/.test(type), passive = /passive|expertise|talent|buff|support/.test(type);
     var coefficientAvailable = typeof raw.base === 'number' && Number.isFinite(raw.base) && typeof raw.perLevel === 'number' && Number.isFinite(raw.perLevel) && typeof raw.damageRatio === 'number' && Number.isFinite(raw.damageRatio);
     var coefficient = coefficientAvailable ? (raw.base + info.skillLv * raw.perLevel) * raw.damageRatio : 0;
     var delays = array(raw.effects).filter(function (e) { return typeof e.damage_delay === 'number' && Number.isFinite(e.damage_delay) && e.damage_delay > 0; }).map(function (e) {
       return { effectId: e.id, damageDelayMs: e.damage_delay, horizontalSpeed: typeof e.horizontal_speed === 'number' ? e.horizontal_speed : null };
     });
+    var cooldown = null, intervalMs = typeof raw.intervalMs === 'number' && Number.isFinite(raw.intervalMs) ? raw.intervalMs : 0;
+    var preCdMs = typeof raw.preCdMs === 'number' && Number.isFinite(raw.preCdMs) ? raw.preCdMs : 0;
+    if (type === 'active') {
+      var rate = Math.max(-0.5, activeCooldownRate === undefined ? 0 : activeCooldownRate);
+      cooldown = { effectId: 75750, recordedRate: activeCooldownRate === undefined ? 0 : activeCooldownRate, clampedRate: rate,
+        rawPreCdMs: preCdMs, rawIntervalMs: intervalMs, sourceDividedPreCdMs: preCdMs / (1 + rate), sourceDividedIntervalMs: intervalMs / (1 + rate),
+        preCdMs: Math.floor(preCdMs / (1 + rate)), intervalMs: Math.floor(intervalMs / (1 + rate)),
+        quantizationBasis: 'recorded whole-millisecond agreement; source division itself is unrounded' };
+      preCdMs = cooldown.preCdMs; intervalMs = cooldown.intervalMs;
+    }
     return {
       id: info.skillId, groupId: raw.groupId || info.skillId, name: raw.name || ('Skill ' + info.skillId), nameKey: raw.nameKey || '', descriptionKey: raw.descriptionKey || '',
       type: passive ? 'passive' : auto ? 'auto' : type === 'active' ? 'active' : type,
       level: info.skillLv, maxLevel: Math.max(raw.maxLevel || 1, info.skillLv), snapshotMaxLevel: raw.maxLevel || null,
       recordedLevelAboveSnapshotCap: info.skillLv > (raw.maxLevel || 1), locked: false,
       coefficient: coefficient, coefficientAvailable: coefficientAvailable, damageType: raw.damageType || 'physical',
-      interval: typeof raw.intervalMs === 'number' && Number.isFinite(raw.intervalMs) ? raw.intervalMs / 1000 : 0,
-      preCooldown: typeof raw.preCdMs === 'number' && Number.isFinite(raw.preCdMs) ? raw.preCdMs / 1000 : 0,
+      interval: intervalMs / 1000, preCooldown: preCdMs / 1000, recordedCooldownAdjustment: cooldown,
       targetCount: 1, source: 'exact recorded skill ID and level; recovered snapshot coefficient; estimated application',
       sourceDamageDelays: delays, modelImpactPolicy: 'immediate scheduled attack; recovered delay not executed', raw: raw
     };
@@ -399,13 +412,14 @@
    */
   function simulateRecordedSnapshot(battle, data, modelInput) {
     data = data || {}; modelInput = modelInput || {};
-    var errors = [], warnings = [], omitted = [], bindings = [], supportedDelays = [], prepared = { left: [null, null, null, null, null], right: [null, null, null, null, null] };
+    var errors = [], warnings = [], omitted = [], bindings = [], supportedDelays = [], cooldowns = [], prepared = { left: [null, null, null, null, null], right: [null, null, null, null, null] };
     var observations = [], seenSlots = {}, modeled = 0, explicitRole = modelInput.attackerSide === 'left' || modelInput.attackerSide === 'right';
     var diagnostics = {
       mode: 'recorded-effective-hero-snapshot', inputReconstruction: 'not performed; explicit report values used',
       effectiveMapping: RECORDED_EFFECT_MAPPING, mappingEvidence: RECORDED_INPUT_EVIDENCE, damageModelRecalibrated: false,
       separateMagicChannels: false, omittedUnits: omitted, sourceUnits: bindings,
       warnings: warnings, omittedImpactDelays: supportedDelays, fullBattleMechanicsSupported: false,
+      recordedActiveCooldownAdjustments: cooldowns,
       limitations: ['Hero-only projection: UAV, Dominator, pets and other support units omitted.', 'Buffs, DOT, shields, healing, penetration, critical resistance and triggered/awakening mechanics remain unsupported.',
         'Reported effective values describe initial inputs, not every later buff state.', 'Exact skill IDs/levels are joined to a historical snapshot; schema version does not prove matching gameplay configuration.',
         'One auto and one active damage profile per hero are modeled; no generic skills or reconstructed gear/research are inserted.', 'Source damage delays are recorded as diagnostics; target/cancellation policy remains unresolved.']
@@ -463,11 +477,12 @@
         if (damageCandidate && (!number(source.base) || !number(source.perLevel) || !number(source.damageRatio) || source.base < 0 || source.perLevel < 0 || source.damageRatio < 0)) {
           fail(spath, 'Damage-profile coefficient metadata is incomplete or invalid.'); return;
         }
-        var profile = recordedSkillProfile(source, info);
+        var profile = recordedSkillProfile(source, info, effects[75750]);
         if (!number(profile.coefficient) || profile.coefficient < 0) { fail(spath, 'Coefficient arithmetic is not finite.'); return; }
         if (damageCandidate && profile.coefficient > 0 && (!number(source.intervalMs) || source.intervalMs <= 0 || !number(source.preCdMs) || source.preCdMs < 0)) {
           fail(spath, 'Positive damage-profile scheduling metadata is incomplete or invalid.'); return;
         }
+        if (damageCandidate && profile.coefficient > 0 && profile.interval <= 0) { fail(spath, 'Recorded rate produces a nonpositive quantized interval; unsupported diagnostic input.'); return; }
         if (!damageCandidate && !profile.coefficientAvailable) warnings.push({ index: rawUnit.index, skillId: info.skillId, reason: 'Unexecuted passive/triggered metadata has no complete damage coefficient; retained as unsupported, not synthesized.' });
         profiles.push(profile);
         if (profile.recordedLevelAboveSnapshotCap) warnings.push({ index: rawUnit.index, skillId: info.skillId, reason: 'Recorded level exceeds snapshot row cap; recorded level retained, eligibility/config equivalence unproven.' });
@@ -477,7 +492,10 @@
       var used = [autos[0], actives[0]].filter(Boolean), unsupported = profiles.filter(function (p) { return used.indexOf(p) < 0; }).map(function (p) {
         return { heroId: rawUnit.heroId, skillId: p.id, groupId: p.groupId, name: p.name, level: p.level, reason: p.coefficient <= 0 ? 'Non-damaging recorded ability is not replaced by invented damage.' : 'Recorded passive/triggered/extra ability mechanics remain unsupported.' };
       });
-      used.forEach(function (p) { p.sourceDamageDelays.forEach(function (delay) { supportedDelays.push(Object.assign({ index: rawUnit.index, skillId: p.id }, delay)); }); });
+      used.forEach(function (p) {
+        p.sourceDamageDelays.forEach(function (delay) { supportedDelays.push(Object.assign({ index: rawUnit.index, skillId: p.id }, delay)); });
+        if (p.recordedCooldownAdjustment) cooldowns.push(Object.assign({ index: rawUnit.index, skillId: p.id }, p.recordedCooldownAdjustment));
+      });
       var side = rawUnit.index <= 5 ? 'left' : 'right', slot = (rawUnit.index - 1) % 5;
       var role = explicitRole ? modelInput.attackerSide === side ? 'attacker' : 'defender' : 'unknown';
       var binding = { index: rawUnit.index, heroId: rawUnit.heroId, skillIds: profiles.map(function (p) { return p.id; }),
@@ -513,11 +531,14 @@
       rawWinnerValue: number(battle.fightResult) ? battle.fightResult : null };
     if (!explicitRole) result.roles = { left: 'unknown', right: 'unknown', attackerSide: null, defenderSide: null };
     result.modelNotes = MODEL_NOTES.map(recordedModelNote); result.caveats = result.modelNotes.slice();
+    result.modelNotes.push('Recorded active cooldowns use source division by1+max(effect75750,-0.5); millisecond flooring matches these observations and is an explicit quantization assumption.');
+    result.caveats = result.modelNotes.slice();
     result.notes = Array.from(new Set(result.notes.map(recordedModelNote).concat(diagnostics.limitations)));
+    if (cooldowns.length) result.notes.push('Recorded active cooldown rates are applied with the source lower bound-0.5 and observed whole-millisecond quantization; ordinary setup timing is unchanged.');
     result.capabilities = Object.assign({}, CAPABILITIES, { inputMode: 'recorded-effective-snapshot', gear: 'not reconstructed', technology: 'not reconstructed', criticalInputs: 'recorded without setup cap' });
     return result;
   }
-  return { version: '0.3.0-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
+  return { version: '0.3.1-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
     computeUnit: computeUnit, resolveExperience: resolveExperience, simulate: simulate, simulateRecordedSnapshot: simulateRecordedSnapshot,
     recordedEffectMapping: RECORDED_EFFECT_MAPPING, recordedInputEvidence: RECORDED_INPUT_EVIDENCE,
     equipmentSelection: equipmentSelection, technologyModifiers: technologyModifiers };
