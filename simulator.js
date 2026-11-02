@@ -58,7 +58,7 @@ function deployedTypes(side){const counts={tank:0,missile:0,aircraft:0};for(cons
 function computed(c,side){if(!c)return null;try{return E.computeUnit({...c,role:setup.attackerSide===side?'attacker':'defender',deployedTypes:deployedTypes(side)},{...setup.tech[side],deployedArmyTypeCounts:deployedTypes(side)},D);}catch{return null;}}
 function toast(key){$('toast').textContent=t(key);$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,2600);}
 function stop(){playing=false;cancelAnimationFrame(raf);$('play').textContent=t('play');}
-function invalidate(){stop();result=null;playTime=0;$('results').hidden=true;$('run-status').textContent=t('setupChanged');setStore('lw-battle-autosave',setup);renderBoards();}
+function invalidate(){stop();result=null;window.LastWikiReplay?.setSimulation(null);playTime=0;$('results').hidden=true;$('run-status').textContent=t('setupChanged');setStore('lw-battle-autosave',setup);renderBoards();}
 function renderChrome(){
  document.documentElement.lang=lang.replace('_','-');document.documentElement.dir=lang==='ar'?'rtl':'ltr';document.title=t('title')+' · Last Wiki';
  document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=t(el.dataset.i18n));
@@ -152,10 +152,10 @@ function renderResults(){
  $('result-notes').innerHTML=`<p>${esc(t('estimateNote'))}</p>${notes.length?`<details><summary>${esc(t('unsupported'))} (${notes.length})</summary><ul>${notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul></details>`:''}`;
  playTime=0;paintHealth(0);$('run-status').textContent=t('result');
 }
-function run(){stop();try{setup=normalize(setup);result=E.simulate(clone(setup),D);if(!result||!Array.isArray(result.events)||result.reason==='empty-team')throw Error('Invalid result');renderResults();}catch(error){result=null;$('results').hidden=true;$('run-status').textContent=t('emptyTeams');toast('emptyTeams');}}
+function run(){stop();try{setup=normalize(setup);result=E.simulate(clone(setup),D);if(!result||!Array.isArray(result.events)||result.reason==='empty-team')throw Error('Invalid result');renderResults();window.LastWikiReplay?.setSimulation(result);}catch(error){result=null;window.LastWikiReplay?.setSimulation(null);$('results').hidden=true;$('run-status').textContent=t('emptyTeams');toast('emptyTeams');}}
 function tick(now){if(!playing||!result)return;const delta=lastTick?(now-lastTick)/1000:0;lastTick=now;const previous=playTime;playTime=Math.min(result.duration,playTime+delta*Number($('speed').value));paintHealth(playTime);for(const e of result.events.filter(e=>e.time>previous&&e.time<=playTime&&Number.isInteger(e.targetSlot))){const card=document.querySelector(`[data-side="${e.targetSide}"][data-slot="${e.targetSlot}"]`);if(card){card.classList.remove('hit');void card.offsetWidth;card.classList.add('hit');}}if(playTime>=result.duration){stop();return;}raf=requestAnimationFrame(tick);}
 function download(name,value){const blob=new Blob([JSON.stringify(value,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-function renderAll(){renderChrome();renderBoards();renderInspector();if(result)renderResults();}
+function renderAll(){renderChrome();renderBoards();renderInspector();window.LastWikiReplay?.setLanguage(lang);if(result)renderResults();}
 document.addEventListener('click',e=>{
  const tech=e.target.closest('[data-tech-side]');if(tech){openResearch(tech.dataset.techSide);return;}
  const slot=e.target.closest('[data-slot]');if(slot){selected={side:slot.dataset.side,slot:Number(slot.dataset.slot)};renderBoards();renderInspector();return;}
@@ -206,5 +206,6 @@ $('import').addEventListener('click',()=>$('import-file').click());
 $('import-file').addEventListener('change',async e=>{const f=e.target.files[0];try{if(!f||f.size>200000)throw Error();const parsed=normalize(JSON.parse(await f.text()));setup=parsed;invalidate();renderAll();toast('saved');}catch{toast('invalidFile');}e.target.value='';});
 $('share').addEventListener('click',async()=>{const url=new URL(location.href);url.searchParams.set('lang',lang);url.hash='setup='+encodeURIComponent(JSON.stringify(setup));history.replaceState(null,'',url);try{await navigator.clipboard.writeText(url.href);toast('copied');}catch{toast('share');}});
 $('download-log').addEventListener('click',()=>{if(result)download('last-wiki-estimated-battle.json',{status:'Estimated model, not official game output',setup,result});});
+window.LastWikiReplay?.init($('replay-lab'),lang);
 renderAll();
 })();
