@@ -283,7 +283,7 @@
   function seedNumber(value) { if (typeof value === 'number' && Number.isFinite(value)) return value >>> 0; var s = String(value === undefined ? 12345 : value), h = 2166136261; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
   function rngFor(seed) { var a = seedNumber(seed); return function () { a = (a + 0x6D2B79F5) | 0; var t = a; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
   function counterFactor(attacker, defender, model) { return ({ aircraft: 'tank', tank: 'missile', missile: 'aircraft' })[attacker] === defender ? 1 + model.typeCounterBonus : 1; }
-  function simulate(input, data) {
+  function runSimulation(input, data, prepared) {
     input = input || {}; data = data || {}; var model = modelOptions(input.model), rand = rngFor(input.seed), events = [], frames = [], queue = [], serial = 0;
     var attackerSide = input.attackerSide === 'right' ? 'right' : 'left';
     var roles = { left: attackerSide === 'left' ? 'attacker' : 'defender', right: attackerSide === 'right' ? 'attacker' : 'defender', attackerSide: attackerSide, defenderSide: attackerSide === 'left' ? 'right' : 'left' };
@@ -293,10 +293,10 @@
       array(input[side]).slice(0, 5).forEach(function (c) { var h = c && heroById(c.heroId, data); if (h) { var t = typeName(h.type || h.unitType || h.army_type); deployedTypes[t] = (deployedTypes[t] || 0) + 1; } });
       for (var slot = 0; slot < 5; slot++) {
         var cfg = Array.isArray(input[side]) ? input[side][slot] : null, unit = null;
-        try { unit = computeUnit(cfg ? Object.assign({}, cfg, { role: roles[side], deployedTypes: deployedTypes }) : cfg, tech[side] && typeof tech[side] === 'object' ? Object.assign({}, tech[side], { deployedArmyTypeCounts: deployedTypes }) : tech[side], data, model); } catch (e) { errors.push(side + ' slot ' + (slot + 1) + ': ' + e.message); }
+        try { unit = prepared ? prepared[side][slot] : computeUnit(cfg ? Object.assign({}, cfg, { role: roles[side], deployedTypes: deployedTypes }) : cfg, tech[side] && typeof tech[side] === 'object' ? Object.assign({}, tech[side], { deployedArmyTypeCounts: deployedTypes }) : tech[side], data, model); } catch (e) { errors.push(side + ' slot ' + (slot + 1) + ': ' + e.message); }
         initial[side].push(unit);
         if (!unit) { teams[side].push(null); continue; }
-        var combatant = Object.assign({}, unit, { side: side, slot: slot, hp: unit.stats.hp, damageDone: 0, damageTaken: 0, healingDone: 0, kills: 0 });
+        var combatant = Object.assign({}, unit, { side: side, slot: slot, hp: prepared ? unit.initialHp : unit.stats.hp, damageDone: 0, damageTaken: 0, healingDone: 0, kills: 0 });
         teams[side].push(combatant); unsupported = unsupported.concat(unit.unsupportedSkills); notes = notes.concat(unit.notes);
         unit.skills.forEach(function (skill) { queue.push({ time: Math.max(0.1, skill.preCooldown), serial: serial++, side: side, slot: slot, skill: skill }); });
       }
@@ -339,6 +339,186 @@
       totalDamage: { left: left.totalDamage, right: right.totalDamage }, seed: input.seed === undefined ? 12345 : input.seed, model: model,
       roles: roles, capabilities: CAPABILITIES, notes: Array.from(new Set(notes)), modelNotes: MODEL_NOTES.slice(), unsupportedSkills: unsupported, caveats: MODEL_NOTES.slice(), errors: errors };
   }
-  return { version: '0.2.0-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
-    computeUnit: computeUnit, resolveExperience: resolveExperience, simulate: simulate, equipmentSelection: equipmentSelection, technologyModifiers: technologyModifiers };
+  // Public setup simulation never accepts effective-stat overrides or prepared units.
+  function simulate(input, data) { return runSimulation(input, data, null); }
+
+  var RECORDED_EFFECT_MAPPING = Object.freeze({
+    50014: 'HealPoint_Result: max-HP diagnostic only when integer report HP agrees',
+    50015: 'PhysicalAttack_Result: model attack input', 50016: 'Hero_ATK_Result: diagnostic constituent, NOT magic attack',
+    50017: 'PhysicalDefense_Result: model defense input', 50018: 'Hero_DEF_Result: diagnostic constituent, NOT magic defense',
+    50011: 'CriticalRate_Result', 50012: 'CriticalDamage_Result'
+  });
+  var RECORDED_INPUT_EVIDENCE = Object.freeze({
+    sourceScript: 'Global/EnumType.luac', sourceSHA256: '035d2c3c4537d216e13b0a4d45a25cff178cef511f96890ec0fb5a1b50a4260a', prototype: 'root', pcBase: 0,
+    assignments: { 50011: { name: 'CriticalRate_Result', pc: 35575 }, 50012: { name: 'CriticalDamage_Result', pc: 35578 },
+      50014: { name: 'HealPoint_Result', pc: 35584 }, 50015: { name: 'PhysicalAttack_Result', pc: 35587 }, 50016: { name: 'Hero_ATK_Result', pc: 35590 },
+      50017: { name: 'PhysicalDefense_Result', pc: 35593 }, 50018: { name: 'Hero_DEF_Result', pc: 35596 } },
+    scope: 'Literal source names; no source-backed independent magic channel mapping. Float HP restoration additionally requires report integer agreement.'
+  });
+  function recordedModelNote(note) {
+    if (note.indexOf('Recovered client template/rank parameters') === 0) return 'Recorded initial HP, attack, defense and critical properties are used directly; no template, gear, technology or form stat reconstruction is performed.';
+    if (note.indexOf('Critical chance uses an assumed base') === 0) return 'Recorded critical chance and critical multiplier are retained directly without the normal setup85% chance cap; critical resistance and later buff changes are not modeled.';
+    if (note.indexOf('Only generic auto and active damage') === 0) return 'Only exact recorded auto/active damage profiles are executed with their recorded skill levels. Passives, shields, DOT, healing, support and triggered/awakening mechanics remain omitted.';
+    return note;
+  }
+  function sourceSkillCatalog(hero) {
+    var found = {};
+    function visit(skill) {
+      if (!skill || typeof skill !== 'object') return;
+      if (Number.isInteger(Number(skill.id))) found[Number(skill.id)] = skill;
+      array(skill.variants).forEach(visit);
+    }
+    array(hero.skills).forEach(visit);
+    array(hero.recordedSkills).forEach(visit);
+    Object.keys(hero.modes || {}).forEach(function (mode) { array(hero.modes[mode] && hero.modes[mode].skills).forEach(visit); });
+    return found;
+  }
+  function recordedSkillProfile(raw, info) {
+    var type = String(raw.type || '').toLowerCase(), auto = /auto|normal|basic/.test(type), passive = /passive|expertise|talent|buff|support/.test(type);
+    var coefficientAvailable = typeof raw.base === 'number' && Number.isFinite(raw.base) && typeof raw.perLevel === 'number' && Number.isFinite(raw.perLevel) && typeof raw.damageRatio === 'number' && Number.isFinite(raw.damageRatio);
+    var coefficient = coefficientAvailable ? (raw.base + info.skillLv * raw.perLevel) * raw.damageRatio : 0;
+    var delays = array(raw.effects).filter(function (e) { return typeof e.damage_delay === 'number' && Number.isFinite(e.damage_delay) && e.damage_delay > 0; }).map(function (e) {
+      return { effectId: e.id, damageDelayMs: e.damage_delay, horizontalSpeed: typeof e.horizontal_speed === 'number' ? e.horizontal_speed : null };
+    });
+    return {
+      id: info.skillId, groupId: raw.groupId || info.skillId, name: raw.name || ('Skill ' + info.skillId), nameKey: raw.nameKey || '', descriptionKey: raw.descriptionKey || '',
+      type: passive ? 'passive' : auto ? 'auto' : type === 'active' ? 'active' : type,
+      level: info.skillLv, maxLevel: Math.max(raw.maxLevel || 1, info.skillLv), snapshotMaxLevel: raw.maxLevel || null,
+      recordedLevelAboveSnapshotCap: info.skillLv > (raw.maxLevel || 1), locked: false,
+      coefficient: coefficient, coefficientAvailable: coefficientAvailable, damageType: raw.damageType || 'physical',
+      interval: typeof raw.intervalMs === 'number' && Number.isFinite(raw.intervalMs) ? raw.intervalMs / 1000 : 0,
+      preCooldown: typeof raw.preCdMs === 'number' && Number.isFinite(raw.preCdMs) ? raw.preCdMs / 1000 : 0,
+      targetCount: 1, source: 'exact recorded skill ID and level; recovered snapshot coefficient; estimated application',
+      sourceDamageDelays: delays, modelImpactPolicy: 'immediate scheduled attack; recovered delay not executed', raw: raw
+    };
+  }
+  /**
+   * Explicit diagnostic projection of decoded report inputs. This is not replay and
+   * does not accept observed damage as predicted damage. Normal setup stats are not
+   * reconstructed: no equipment, research, support unit or passive is fabricated.
+   */
+  function simulateRecordedSnapshot(battle, data, modelInput) {
+    data = data || {}; modelInput = modelInput || {};
+    var errors = [], warnings = [], omitted = [], bindings = [], supportedDelays = [], prepared = { left: [null, null, null, null, null], right: [null, null, null, null, null] };
+    var observations = [], seenSlots = {}, modeled = 0, explicitRole = modelInput.attackerSide === 'left' || modelInput.attackerSide === 'right';
+    var diagnostics = {
+      mode: 'recorded-effective-hero-snapshot', inputReconstruction: 'not performed; explicit report values used',
+      effectiveMapping: RECORDED_EFFECT_MAPPING, mappingEvidence: RECORDED_INPUT_EVIDENCE, damageModelRecalibrated: false,
+      separateMagicChannels: false, omittedUnits: omitted, sourceUnits: bindings,
+      warnings: warnings, omittedImpactDelays: supportedDelays, fullBattleMechanicsSupported: false,
+      limitations: ['Hero-only projection: UAV, Dominator, pets and other support units omitted.', 'Buffs, DOT, shields, healing, penetration, critical resistance and triggered/awakening mechanics remain unsupported.',
+        'Reported effective values describe initial inputs, not every later buff state.', 'Exact skill IDs/levels are joined to a historical snapshot; schema version does not prove matching gameplay configuration.',
+        'One auto and one active damage profile per hero are modeled; no generic skills or reconstructed gear/research are inserted.', 'Source damage delays are recorded as diagnostics; target/cancellation policy remains unresolved.']
+    };
+    function fail(path, message) { errors.push({ path: path, message: message }); }
+    function number(value) { return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER; }
+    if (!battle || typeof battle !== 'object' || !Array.isArray(battle.units)) {
+      fail('units', 'Expected a decoded battle with a units array.'); return { ok: false, errors: errors, diagnostics: diagnostics };
+    }
+    battle.units.forEach(function (rawUnit, ui) {
+      var path = 'units[' + ui + ']';
+      if (!rawUnit || typeof rawUnit !== 'object') { fail(path, 'Unit must be an object.'); return; }
+      if (rawUnit.unitType !== 1) { omitted.push({ index: number(rawUnit.index) ? rawUnit.index : null, unitType: number(rawUnit.unitType) ? rawUnit.unitType : null, reason: 'Support/non-hero mechanics are not synthesized.' }); return; }
+      if (!Number.isInteger(rawUnit.index) || rawUnit.index < 1 || rawUnit.index > 10) { fail(path + '.index', 'Hero index must be an integer in 1..10.'); return; }
+      if (seenSlots[rawUnit.index]) { fail(path + '.index', 'Duplicate hero index.'); return; } seenSlots[rawUnit.index] = true;
+      var hero = Number.isInteger(rawUnit.heroId) ? heroById(rawUnit.heroId, data) : null;
+      if (!hero) { fail(path + '.heroId', 'Exact hero definition is unavailable; generic fallback is prohibited.'); return; }
+      if (!Number.isInteger(rawUnit.heroLevel) || rawUnit.heroLevel < 1) fail(path + '.heroLevel', 'Recorded hero level must be a positive integer.');
+      if (!number(rawUnit.maxHp) || rawUnit.maxHp <= 0) fail(path + '.maxHp', 'Positive numeric report maxHp is required.');
+      if (!number(rawUnit.hpBeforeStart) || rawUnit.hpBeforeStart < 0 || rawUnit.hpBeforeStart > rawUnit.maxHp) fail(path + '.hpBeforeStart', 'Numeric starting HP must lie in [0,maxHp].');
+      if (rawUnit.hp !== undefined && (!number(rawUnit.hp) || rawUnit.hp < 0 || rawUnit.hp > rawUnit.maxHp + 1)) fail(path + '.hp', 'Ending HP must be a finite nonnegative report value.');
+      var effects = {}, duplicateEffects = {}, validEffects = Array.isArray(rawUnit.effects);
+      if (!validEffects) fail(path + '.effects', 'Recorded effective effects array is required.');
+      (validEffects ? rawUnit.effects : []).forEach(function (e, ei) {
+        if (!e || !Number.isInteger(e.effectId)) { fail(path + '.effects[' + ei + ']', 'Effect requires an exact numeric definition ID.'); return; }
+        var value = e.value === undefined ? 0 : e.value; // explicit proto3 zero default
+        if (!number(value)) { fail(path + '.effects[' + ei + '].value', 'Effect value must be a finite number, not a numeric string.'); return; }
+        if (Object.prototype.hasOwnProperty.call(effects, e.effectId)) duplicateEffects[e.effectId] = true;
+        effects[e.effectId] = value;
+      });
+      Object.keys(duplicateEffects).forEach(function (id) { fail(path + '.effects', 'Duplicate effective effect ID ' + id + '.'); });
+      [50015, 50017, 50011, 50012].forEach(function (id) { if (!Object.prototype.hasOwnProperty.call(effects, id)) fail(path + '.effects', 'Missing required effective property ' + id + '.'); });
+      if (effects[50015] !== undefined && effects[50015] <= 0) fail(path + '.effects.50015', 'Positive reported attack is required.');
+      if (effects[50017] !== undefined && effects[50017] < 0) fail(path + '.effects.50017', 'Reported defense cannot be negative.');
+      if (effects[50011] !== undefined && (effects[50011] < 0 || effects[50011] > 1)) fail(path + '.effects.50011', 'Recorded critical chance outside [0,1]; no cap is inferred.');
+      if (effects[50012] !== undefined && effects[50012] <= 0) fail(path + '.effects.50012', 'Positive recorded critical multiplier is required.');
+      var maxHp = rawUnit.maxHp, startingHp = rawUnit.hpBeforeStart, hpSource = 'report.maxHp / report.hpBeforeStart';
+      if (Object.prototype.hasOwnProperty.call(effects, 50014)) {
+        if (effects[50014] <= 0) fail(path + '.effects.50014', 'HP diagnostic must be positive.');
+        else if (number(maxHp) && Math.trunc(effects[50014]) === Math.trunc(maxHp)) {
+          maxHp = effects[50014];
+          if (rawUnit.hpBeforeStart === rawUnit.maxHp) { startingHp = maxHp; hpSource = 'float effect50014: full-start integer truncation agrees'; }
+          else hpSource = 'float max effect50014; wounded report.hpBeforeStart retained without guessed fraction';
+        } else warnings.push({ index: rawUnit.index, reason: 'Effect50014 disagrees with integer report maxHp; report HP retained, no float replacement.' });
+      }
+      var catalog = sourceSkillCatalog(hero), profiles = [], skillIds = {}, infoList = rawUnit.skillInfos;
+      if (!Array.isArray(infoList) || !infoList.length) fail(path + '.skillInfos', 'Exact recorded skill metadata is required; no generic attacks inserted.');
+      (Array.isArray(infoList) ? infoList : []).forEach(function (info, si) {
+        var spath = path + '.skillInfos[' + si + ']';
+        if (!info || !Number.isSafeInteger(info.skillId) || !Number.isSafeInteger(info.skillLv) || info.skillLv < 1 || info.skillLv > 1000) { fail(spath, 'Skill ID and positive skill level must be safe integers; diagnostic level safety limit is1000, not a gameplay cap.'); return; }
+        if (skillIds[info.skillId]) { fail(spath, 'Duplicate recorded skill ID.'); return; } skillIds[info.skillId] = true;
+        var source = catalog[info.skillId];
+        if (!source) { fail(spath + '.skillId', 'Exact recovered skill ID unavailable: ' + info.skillId + '; no group/variant substitution.'); return; }
+        var damageCandidate = /^(auto|active|normal|basic)$/.test(String(source.type || '').toLowerCase());
+        if (damageCandidate && (!number(source.base) || !number(source.perLevel) || !number(source.damageRatio) || source.base < 0 || source.perLevel < 0 || source.damageRatio < 0)) {
+          fail(spath, 'Damage-profile coefficient metadata is incomplete or invalid.'); return;
+        }
+        var profile = recordedSkillProfile(source, info);
+        if (!number(profile.coefficient) || profile.coefficient < 0) { fail(spath, 'Coefficient arithmetic is not finite.'); return; }
+        if (damageCandidate && profile.coefficient > 0 && (!number(source.intervalMs) || source.intervalMs <= 0 || !number(source.preCdMs) || source.preCdMs < 0)) {
+          fail(spath, 'Positive damage-profile scheduling metadata is incomplete or invalid.'); return;
+        }
+        if (!damageCandidate && !profile.coefficientAvailable) warnings.push({ index: rawUnit.index, skillId: info.skillId, reason: 'Unexecuted passive/triggered metadata has no complete damage coefficient; retained as unsupported, not synthesized.' });
+        profiles.push(profile);
+        if (profile.recordedLevelAboveSnapshotCap) warnings.push({ index: rawUnit.index, skillId: info.skillId, reason: 'Recorded level exceeds snapshot row cap; recorded level retained, eligibility/config equivalence unproven.' });
+      });
+      var autos = profiles.filter(function (p) { return p.type === 'auto' && p.coefficient > 0; }), actives = profiles.filter(function (p) { return p.type === 'active' && p.coefficient > 0; });
+      if (!autos.length) fail(path + '.skillInfos', 'No exact supported positive auto-attack profile; no generic auto inserted.');
+      var used = [autos[0], actives[0]].filter(Boolean), unsupported = profiles.filter(function (p) { return used.indexOf(p) < 0; }).map(function (p) {
+        return { heroId: rawUnit.heroId, skillId: p.id, groupId: p.groupId, name: p.name, level: p.level, reason: p.coefficient <= 0 ? 'Non-damaging recorded ability is not replaced by invented damage.' : 'Recorded passive/triggered/extra ability mechanics remain unsupported.' };
+      });
+      used.forEach(function (p) { p.sourceDamageDelays.forEach(function (delay) { supportedDelays.push(Object.assign({ index: rawUnit.index, skillId: p.id }, delay)); }); });
+      var side = rawUnit.index <= 5 ? 'left' : 'right', slot = (rawUnit.index - 1) % 5;
+      var role = explicitRole ? modelInput.attackerSide === side ? 'attacker' : 'defender' : 'unknown';
+      var binding = { index: rawUnit.index, heroId: rawUnit.heroId, skillIds: profiles.map(function (p) { return p.id; }),
+        requiredEffects: { 50015: effects[50015], 50017: effects[50017], 50011: effects[50011], 50012: effects[50012] },
+        hpSource: hpSource, maxHp: number(maxHp) ? maxHp : null, startingHp: number(startingHp) ? startingHp : null,
+        constituentsOnly: { Hero_ATK_Result_50016: effects[50016] === undefined ? null : effects[50016], Hero_DEF_Result_50018: effects[50018] === undefined ? null : effects[50018] } };
+      bindings.push(binding); modeled += 1;
+      prepared[side][slot] = { heroId: rawUnit.heroId, name: hero.name || ('Hero ' + rawUnit.heroId), image: hero.image || '', type: typeName(hero.type || hero.unitType), role: role, form: 'recorded',
+        level: rawUnit.heroLevel, effectiveLevel: rawUnit.heroLevel, unusedExp: 0, rankId: Number.isInteger(rawUnit.rankLv) ? rawUnit.rankLv : null,
+        stats: { hp: maxHp, attack: effects[50015], defense: effects[50017], critChance: effects[50011], critMultiplier: effects[50012] }, initialHp: startingHp,
+        skills: used, allSkills: profiles, unsupportedSkills: unsupported,
+        notes: ['Explicit recorded effective stats, exact skill IDs and recorded levels; no setup stats, gear, technology or form bonuses were synthesized.'],
+        config: { heroId: rawUnit.heroId, recorded: true }, sourceBinding: binding,
+        capabilities: Object.assign({}, CAPABILITIES, { inputMode: 'recorded-effective-snapshot', gear: 'not reconstructed', technology: 'not reconstructed', criticalInputs: 'recorded without setup cap' }) };
+      var stat = rawUnit.stat || {};
+      ['damage', 'injured', 'critDamage', 'critNum'].forEach(function (key) { if (stat[key] !== undefined && !number(stat[key])) fail(path + '.stat.' + key, 'Observed statistic must be a finite bounded number when present.'); });
+      observations.push({ side: side, slot: slot, index: rawUnit.index, heroId: rawUnit.heroId, startingHp: startingHp, endingHp: rawUnit.hp === undefined ? 0 : rawUnit.hp,
+        endingHpFieldPresent: rawUnit.hp !== undefined, damage: number(stat.damage) ? stat.damage : 0, injured: number(stat.injured) ? stat.injured : 0,
+        critDamage: number(stat.critDamage) ? stat.critDamage : 0, critNum: number(stat.critNum) ? stat.critNum : 0 });
+    });
+    diagnostics.modeledHeroCount = modeled;
+    if (!prepared.left.some(Boolean) || !prepared.right.some(Boolean)) fail('units', 'At least one validated hero on each view side is required.');
+    var sourceHash = battle.sourceSHA256 || battle.sourceDecodedSHA256 || battle.decodedSHA256 || battle.sourceBinding && (battle.sourceBinding.sourceSHA256 || battle.sourceBinding.sha256);
+    diagnostics.sourceBinding = { decodedSHA256: typeof sourceHash === 'string' && /^[a-f0-9]{64}$/i.test(sourceHash) ? sourceHash : null,
+      reportVersion: Number.isInteger(battle.version) ? battle.version : null, configurationMatchProven: false, unitOrder: 'report indices1..5 and6..10 are view sides, not inferred attacker/defender' };
+    if (errors.length) return { ok: false, errors: errors, diagnostics: diagnostics };
+    var result = runSimulation({ seed: modelInput.seed, attackerSide: modelInput.attackerSide, model: modelInput }, data, prepared);
+    var survivingLeft = observations.filter(function (u) { return u.side === 'left' && u.endingHp > 0; }).length;
+    var survivingRight = observations.filter(function (u) { return u.side === 'right' && u.endingHp > 0; }).length;
+    result.ok = true; result.diagnostics = diagnostics;
+    result.recordedObservation = { units: observations, duration: number(battle.totalTime) ? battle.totalTime / 1000 : null,
+      inferredOutcome: survivingLeft && !survivingRight ? 'left' : survivingRight && !survivingLeft ? 'right' : 'unresolved', outcomeBasis: 'hero survivors only; raw winner enum unresolved',
+      rawWinnerValue: number(battle.fightResult) ? battle.fightResult : null };
+    if (!explicitRole) result.roles = { left: 'unknown', right: 'unknown', attackerSide: null, defenderSide: null };
+    result.modelNotes = MODEL_NOTES.map(recordedModelNote); result.caveats = result.modelNotes.slice();
+    result.notes = Array.from(new Set(result.notes.map(recordedModelNote).concat(diagnostics.limitations)));
+    result.capabilities = Object.assign({}, CAPABILITIES, { inputMode: 'recorded-effective-snapshot', gear: 'not reconstructed', technology: 'not reconstructed', criticalInputs: 'recorded without setup cap' });
+    return result;
+  }
+  return { version: '0.3.0-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
+    computeUnit: computeUnit, resolveExperience: resolveExperience, simulate: simulate, simulateRecordedSnapshot: simulateRecordedSnapshot,
+    recordedEffectMapping: RECORDED_EFFECT_MAPPING, recordedInputEvidence: RECORDED_INPUT_EVIDENCE,
+    equipmentSelection: equipmentSelection, technologyModifiers: technologyModifiers };
 });
