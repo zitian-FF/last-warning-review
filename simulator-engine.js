@@ -1,15 +1,15 @@
 (function (root, factory) {
   'use strict';
-  var api = factory();
+  var api = factory(typeof module === 'object' && module.exports ? require('./simulator-counter.js') : root && root.BattleCounter, typeof module === 'object' && module.exports ? require('./simulator-overlord.js') : root && root.BattleOverlord);
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.BattleEngine = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (Counter, Overlord) {
   'use strict';
   var DEFAULT_MODEL = Object.freeze({
     defenseK: 1.8, damageScale: 0.55, critMultiplier: 1.75, baseCritChance: 0.12,
     typeCounterBonus: 0.2,
     autoInterval: 1.5, activeInterval: 8, activeFirst: 4, genericAutoCoefficient: 1,
-    genericActiveCoefficient: 2.4, maxDuration: 90, maxEvents: 12000
+    genericActiveCoefficient: 2.4, maxDuration: 90, maxEvents: 12000, experimentalMechanics: 0
   });
   var MODEL_NOTES = [
     'Estimated comparison model, not the official Last War battle formula.',
@@ -17,11 +17,11 @@
     'Damage = attack² / (attack + defense × defenseK) × selected skill coefficient × damageScale × critical and type factors. This equation is a modeling assumption.',
     'Assumed type cycle: aircraft → tank → missile → aircraft. The configured bonus is estimated.',
     'Critical chance uses an assumed base plus recovered gear/research chance effects, capped at an estimated 85%; critical multiplier remains a model parameter. Other unreviewed percentage effects are not guessed.',
-    'Only generic auto/active damage and bounded source mechanics are simulated: Bullet eligibility/counts, DVA all-hero targets/haste, Tesla timing, Kimberly base rockets, Marshall critical grants, and Swift/Tesla independent DOT clocks/caps. DOT amounts and Marshall delivery timing are estimated; most passives, shields, other DOT/support and triggers remain omitted.',
+    'Only generic auto/active damage and bounded source mechanics are simulated: Scarlett shield pool/expiry (estimated adjacent targeting/delivery), Bullet eligibility/counts, DVA all-hero targets/haste, Tesla timing, Kimberly base rockets, Marshall critical grants, and Swift/Tesla independent DOT clocks/caps. DOT amounts and Marshall delivery timing are estimated; most passives, other shields, other DOT/support and triggers remain omitted.',
     'Equal-time events resolve in stable queue order. The recorded server timing and RNG are not reproduced.',
     'Snapshot configuration and historic report schema versions do not establish current live-game equivalence.'
   ];
-  var CAPABILITIES = Object.freeze({ skillTriggers: false, limitedSourceMechanics: 'source-gated Bullet counts, Tesla timing, DVA all-hero/haste, Kimberly16base rockets, Marshall critical grants and Swift/Tesla DOT clocks/caps; no general trigger/buff solver', dotMechanics: 'exactSwift/Tesla source clocks/caps only, frozen own no-critical estimated amounts; server amount equation unresolved', targeting: 'front-row estimate with exactSwift scheduled lowest-HP-percentage hero selector; DVA includes recorded Dominator only when modeled; Kimberly burst uses modeled random living hero', rng: 'seeded-model-not-server', technology: 'source-reviewed-effects-only', gear: 'recovered-curves-and-cumulative-promotions' });
+  var CAPABILITIES = Object.freeze({ skillTriggers: false, experimentalMechanics: 'Optional Adam counter state/retaliation and Gorilla timed critical active; estimated recipient/delivery/damage policies, disabled by default', shieldMechanics: 'exact UR Scarlett shield amounts/9s; same-ID duration refresh without refill; earliest-expiry model absorption; geometry/delivery estimated, other shields/trigger generation unresolved', limitedSourceMechanics: 'Scarlett shield state plus source-gated Bullet counts, Tesla timing, DVA all-hero/haste, Kimberly16base rockets, Marshall critical grants and Swift/Tesla DOT clocks/caps; no general trigger/buff solver', dotMechanics: 'exactSwift/Tesla source clocks/caps only, frozen own no-critical estimated amounts; server amount equation unresolved', targeting: 'front-row estimate with exactSwift scheduled lowest-HP-percentage hero selector; DVA includes recorded Dominator only when modeled; Kimberly burst uses modeled random living hero', rng: 'seeded-model-not-server', technology: 'source-reviewed-effects-only', gear: 'recovered-curves-and-cumulative-promotions' });
   function finite(value, fallback) { var n = Number(value); return Number.isFinite(n) ? n : fallback; }
   function clamp(value, low, high) { return Math.min(high, Math.max(low, value)); }
   function int(value, fallback) { return Math.round(finite(value, fallback)); }
@@ -269,12 +269,13 @@
         skillProfile({ type: 'active', name: 'Generic active damage', base: model.genericActiveCoefficient, maxLevel: 60, intervalMs: 8000, genericFallback: true }, 1, cfg, rankId, model)];
       notes.push('No recovered skill metadata: explicitly generic auto/active damage profiles used.');
     }
-    skills.forEach(function (skill) { skill.sourceCriticalBuff = sourceMarshallCriticalBuff(hero, skill, data); skill.sourceDot = sourceDotProfile(skill.raw, data); });
+    skills.forEach(function (skill) { skill.sourceCriticalBuff = sourceMarshallCriticalBuff(hero, skill, data); skill.sourceDot = sourceDotProfile(skill.raw, data); skill.sourceShield = sourceScarlettShield(sourceHero, skill, data); skill.sourceCounter = model.experimentalMechanics === 1 && Counter ? Counter.profileFor(hero.id, skill, data) : null; });
     var autos = skills.filter(function (s) { return s.type === 'auto' && s.coefficient > 0 && !s.locked; }), activeSkills = skills.filter(function (s) { return s.type === 'active' && s.coefficient > 0 && !s.locked; });
-    var supports = skills.filter(function (skill) { return skill.sourceCriticalBuff && !skill.locked; });
-    if (supports.length > 1) { supports = []; notes.push('Multiple exact Marshall critical active profiles are ambiguous; no combined grant is synthesized.'); }
+    var supports = skills.filter(function (skill) { return (skill.sourceCriticalBuff || skill.sourceShield || skill.sourceCounter) && !skill.locked; });
+    if (supports.length > 1) { supports = []; notes.push('Multiple exact support active profiles are ambiguous; no combined grant is synthesized.'); }
     var used = [autos[0], activeSkills[0]].filter(Boolean).concat(supports), unsupported = skills.filter(function (s) { return used.indexOf(s) < 0; }).map(function (s) { return { heroId: hero.id, skillId: s.id, groupId: s.groupId, name: s.name, level: s.level, reason: s.locked ? 'Locked: requires hero level ' + s.unlockLevel + ' and rank ' + s.unlockRank : s.coefficient <= 0 ? 'Non-damaging ability: heal/shield/buff mechanics not simulated; no damage is invented' : s.type === 'passive' ? 'Passive/buff mechanics omitted' : 'Only one auto and one active damage profile are executed' }; });
-    if (supports.length) notes.push('Exact Marshall critical-only team grant adds source0.1 for7/8s. Applied at modeled cast as an explicit delivery-time estimate; paired attack/extra buffs, support recipients and general stacking remain unsupported.');
+    if (supports.some(function (skill) { return !!skill.sourceCriticalBuff; })) notes.push('Exact Marshall critical-only team grant adds source0.1 for7/8s. Applied at modeled cast as an explicit delivery-time estimate; paired attack/extra buffs, support recipients and general stacking remain unsupported.');
+    if (supports.some(function (skill) { return !!skill.sourceShield; })) notes.push('Exact Scarlett502610–502615 grants source6%-caster-HP shield for9s to one modeled adjacent ally. Back-row priority is localized; formation geometry/tie and instant delivery are explicit model policies. Paired reduction/defense effects remain omitted.');
     cfg.form = modeName; cfg.level = level; cfg.exp = Math.max(0, finite(cfg.exp, 0)); cfg.shardLevel = shard;
     cfg.skillLevel = Math.max(1, int(cfg.skillLevel, 20)); cfg.weaponLevel = weaponLevel; cfg.awakenLevel = awakenLevel;
     cfg.gear = gearInfo.slots; cfg.role = role;
@@ -296,15 +297,63 @@
   function seedNumber(value) { if (typeof value === 'number' && Number.isFinite(value)) return value >>> 0; var s = String(value === undefined ? 12345 : value), h = 2166136261; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
   function rngFor(seed) { var a = seedNumber(seed); return function () { a = (a + 0x6D2B79F5) | 0; var t = a; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
   function counterFactor(attacker, defender, model) { return ({ aircraft: 'tank', tank: 'missile', missile: 'aircraft' })[attacker] === defender ? 1 + model.typeCounterBonus : 1; }
+  // Shield source arithmetic is separate from the unresolved trigger/target
+  // solver. Only additive_type1, finite-duration subtype2/3 pools are accepted.
+  function sourceShieldAmount(buff, level, casterMaxHp) {
+    if (!buff || buff.type !== 9 || [2, 3].indexOf(buff.sub_type) < 0 || !Array.isArray(buff.buff_time) || buff.buff_time.length !== 2) return null;
+    var para = String(buff.para || '').split(';').map(Number), duration = buff.buff_time[0] + buff.buff_time[1] * level;
+    if (para.length === 2) para.push(0);
+    if (para.length !== 3 || para.some(function (value) { return !Number.isFinite(value); }) || para[2] !== 0 || !Number.isFinite(level) || level < 1 || !Number.isFinite(duration) || duration <= 0) return null;
+    var value = para[0] + para[1] * level;
+    if (buff.sub_type === 2) { if (!Number.isFinite(casterMaxHp) || casterMaxHp <= 0) return null; value *= casterMaxHp; }
+    if (!Number.isFinite(value) || value < 0) return null;
+    return { buffId: buff.id, value: Math.floor(value), durationMs: duration, subType: buff.sub_type };
+  }
+  function shieldState() { return { pools: {}, nextSerial: 1 }; }
+  function expireShieldState(state, atMs) {
+    var expired = [];
+    Object.keys(state.pools).forEach(function (key) { var pool = state.pools[key]; if (pool.expiresMs <= atMs) { expired.push(Object.assign({}, pool)); delete state.pools[key]; } });
+    return expired;
+  }
+  function shieldStateTotal(state, atMs) { return Object.keys(state.pools).reduce(function (total, key) { var pool = state.pools[key]; return total + (pool.expiresMs > atMs ? pool.value : 0); }, 0); }
+  function grantShieldState(state, buff, level, casterMaxHp, atMs, casterIndex) {
+    if (!buff || [1,3].indexOf(buff.additive_type) < 0 || buff.max_level !== 1) return null;
+    var arithmetic = sourceShieldAmount(buff, level, casterMaxHp); if (!arithmetic || !Number.isFinite(atMs)) return null;
+    expireShieldState(state, atMs);
+    var existing = buff.additive_type === 1 ? state.pools[buff.id] : null, refreshed = !!existing;
+    // BuffManager.AddBuff additive1 -> existing:Reset(); BuffBase.Reset only
+    // resets time. It does not rerun Shield.OnStart or refill consumed value.
+    var pool = existing || { buffId: buff.id, value: arithmetic.value, initialValue: arithmetic.value, casterIndex: casterIndex, serial: state.nextSerial++, version: 0 };
+    pool.expiresMs = atMs + arithmetic.durationMs; pool.version = state.nextSerial++;
+    state.pools[buff.id] = pool;
+    return { pool: pool, refreshed: refreshed, granted: refreshed ? 0 : arithmetic.value };
+  }
+  function consumeShieldState(state, damage, atMs) {
+    var expired = expireShieldState(state, atMs), remaining = Math.max(0, finite(damage, 0)), absorbed = 0, broken = [];
+    // BuffManager.ReduceShieldValue sorts finite remaining durations ascending.
+    // Equal-duration order is a stable model tie policy, not server tie proof.
+    Object.keys(state.pools).map(function (key) { return state.pools[key]; }).sort(function (a, b) { return a.expiresMs - b.expiresMs || a.serial - b.serial; }).forEach(function (pool) {
+      if (remaining <= 0) return; var take = Math.min(pool.value, remaining); pool.value -= take; remaining -= take; absorbed += take;
+      if (pool.value <= 0) { broken.push(Object.assign({}, pool)); delete state.pools[pool.buffId]; }
+    });
+    return { remaining: remaining, absorbed: absorbed, expired: expired, broken: broken, shield: shieldStateTotal(state, atMs) };
+  }
+  function sourceScarlettShield(hero, profile, data) {
+    var raw = profile && profile.raw, effects = array(raw && raw.effects), effect = effects.length === 1 ? effects[0] : null, buff = data.recordedBuffs && data.recordedBuffs[502600];
+    if (Number(hero.id) !== 50026 || !raw || profile.type !== 'active' || !Number.isInteger(profile.id) || profile.id < 502610 || profile.id > 502615 || raw.id !== profile.id || raw.groupId !== 502610 || raw.descriptionKey !== 'skill_desc_502610' || !effect || effect.id !== profile.id * 10 || effect.pvp_actionType !== 2 || effect.pvp_bullet !== 0 || String(effect.pvp_pos_condition) !== '1|13|13' || String(effect.pvp_pos_num) !== '1|1|1' || String(effect.pvp_buff_ID) !== profile.id + '|502600|' + (profile.id + 20) || String(effect.pvp_troop_condition) !== '0|0|0' || String(effect.pvp_other_condition) !== '0|0|0' || array(effect.target_type).join('|') !== '1|1|1' || effect.pvp_cast_count !== 1) return null;
+    if (!buff || buff.id !== 502600 || buff.type !== 9 || buff.sub_type !== 2 || buff.para !== '0.06;0;0' || buff.additive_type !== 1 || buff.max_level !== 1 || !Array.isArray(buff.buff_time) || buff.buff_time[0] !== 9000 || buff.buff_time[1] !== 0) return null;
+    return { buffId: 502600, buff: buff, amountPolicy: 'source floor6% of caster modeled maxHP; no observed grant amounts used', targetPolicy: 'Scarlett-only position_adjust_desc back-row priority; estimated formation coordinates/distance and seeded tie order; no support recipient', deliveryPolicy: 'grant at modeled active cast; moving delivery delay omitted', omitted: 'paired damage reduction and defense aura remain unsupported' };
+  }
   function sourceSwiftLowestHp(heroId, profile) {
     var raw = profile && profile.raw, effects = array(raw && raw.effects), effect = effects.length === 1 ? effects[0] : null;
     return Number(heroId) === 50015 && profile.type === 'auto' && Number.isInteger(profile.id) && profile.id >= 501540 && profile.id <= 501545 && raw && raw.id === profile.id && raw.groupId === 501540 && raw.descriptionKey === 'hero_equip_skill_desc_501540' && effect && effect.id === profile.id * 10 && effect.pvp_actionType === 1 && array(effect.target_type).length === 1 && effect.target_type[0] === 0 && String(effect.pvp_pos_condition) === '0' && String(effect.pvp_other_condition) === '2' && String(effect.pvp_troop_condition) === '0';
   }
   function runSimulation(input, data, prepared) {
-    input = input || {}; data = data || {}; var model = modelOptions(input.model), rand = rngFor(input.seed), events = [], frames = [], queue = [], serial = 0, dotStacks = {}, nextDotId = 1;
+    input = input || {}; data = data || {}; var model = modelOptions(input.model), rand = rngFor(input.seed), events = [], frames = [], queue = [], serial = 0, dotStacks = {}, nextDotId = 1, experimental = model.experimentalMechanics === 1, counterState = Counter ? Counter.createState() : null;
     var attackerSide = input.attackerSide === 'right' ? 'right' : 'left';
     var roles = { left: attackerSide === 'left' ? 'attacker' : 'defender', right: attackerSide === 'right' ? 'attacker' : 'defender', attackerSide: attackerSide, defenderSide: attackerSide === 'left' ? 'right' : 'left' };
     var tech = input.tech || {}, teams = { left: [], right: [] }, initial = { left: [], right: [] }, supportTeams = { left: [], right: [] }, supportInitial = { left: [], right: [] }, errors = [], notes = MODEL_NOTES.slice(), unsupported = [];
+    if (experimental) notes.push('Experimental Adam counters and Gorilla timed critical buffs enabled. Counter damage strength multiplies the existing estimated normal coefficient; recipient choice, delivery, recursion exclusions and dynamic modifier composition are model policies, not recovered authoritative rules.');
     ['left', 'right'].forEach(function (side) {
       var deployedTypes = { tank: 0, missile: 0, aircraft: 0 };
       array(input[side]).slice(0, 5).forEach(function (c) { var h = c && heroById(c.heroId, data); if (h) { var t = typeName(h.type || h.unitType || h.army_type); deployedTypes[t] = (deployedTypes[t] || 0) + 1; } });
@@ -313,7 +362,7 @@
         try { unit = prepared ? prepared[side][slot] : computeUnit(cfg ? Object.assign({}, cfg, { role: roles[side], deployedTypes: deployedTypes }) : cfg, tech[side] && typeof tech[side] === 'object' ? Object.assign({}, tech[side], { deployedArmyTypeCounts: deployedTypes }) : tech[side], data, model); } catch (e) { errors.push(side + ' slot ' + (slot + 1) + ': ' + e.message); }
         initial[side].push(unit);
         if (!unit) { teams[side].push(null); continue; }
-        var combatant = Object.assign({}, unit, { side: side, slot: slot, entityKind: 'hero', sourceIndex: side === 'left' ? slot + 1 : slot + 6, hp: prepared ? unit.initialHp : unit.stats.hp, damageDone: 0, damageTaken: 0, dotDamageDone: 0, healingDone: 0, kills: 0, criticalBuffs: {} });
+        var combatant = Object.assign({}, unit, { side: side, slot: slot, entityKind: 'hero', sourceIndex: side === 'left' ? slot + 1 : slot + 6, hp: prepared ? unit.initialHp : unit.stats.hp, damageDone: 0, damageTaken: 0, dotDamageDone: 0, healingDone: 0, kills: 0, criticalBuffs: {}, overlordState: experimental && Overlord ? Overlord.createState() : null, shields: shieldState(), shieldDamageDone: 0, shieldDamageTaken: 0, shieldGranted: 0, shieldReceived: 0 });
         if (unit.recordedHaste) {
           combatant.recordedHaste = Object.assign({}, unit.recordedHaste, { windows: unit.recordedHaste.windows.map(function (window) { return Object.assign({}, window); }) });
           if (combatant.recordedHaste.windows.length) events.push({ time: 0, type: 'buff', side: side, slot: slot, skillId: 501775, buffId: 501742, amount: 0, attackSpeedRate: combatant.recordedHaste.rate, expiresAt: 5, source: 'exact recorded EW opening skill and source grant metadata' });
@@ -326,9 +375,9 @@
     if (prepared && prepared.supports) ['left','right'].forEach(function (side) {
       array(prepared.supports[side]).forEach(function (unit, supportSlot) {
         supportInitial[side].push(unit);
-        var combatant = Object.assign({}, unit, { side: side, slot: null, supportSlot: supportSlot, entityKind: 'dominator', type: 'dominator', hp: unit.initialHp, damageDone: 0, damageTaken: 0, dotDamageDone: 0, healingDone: 0, kills: 0, criticalBuffs: {} });
+        var combatant = Object.assign({}, unit, { side: side, slot: null, supportSlot: supportSlot, entityKind: 'dominator', type: 'dominator', hp: unit.initialHp, damageDone: 0, damageTaken: 0, dotDamageDone: 0, healingDone: 0, kills: 0, criticalBuffs: {}, overlordState: experimental && Overlord ? Overlord.createState() : null, shields: shieldState(), shieldDamageDone: 0, shieldDamageTaken: 0, shieldGranted: 0, shieldReceived: 0 });
         supportTeams[side].push(combatant); unsupported = unsupported.concat(unit.unsupportedSkills); notes = notes.concat(unit.notes);
-        unit.skills.forEach(function (skill) { queue.push({ time: Math.max(0.1, skill.preCooldown), serial: serial++, side: side, slot: null, supportSlot: supportSlot, entityKind: 'dominator', skill: skill }); });
+        unit.skills.forEach(function (skill) { queue.push({ time: skill.sourceOverlord ? 0 : Math.max(0.1, skill.preCooldown), serial: serial++, side: side, slot: null, supportSlot: supportSlot, entityKind: 'dominator', skill: skill }); });
       });
     });
     var deployedMissiles = { left: teams.left.filter(function (unit) { return unit && unit.type === 'missile'; }).length, right: teams.right.filter(function (unit) { return unit && unit.type === 'missile'; }).length };
@@ -341,6 +390,18 @@
       if (actor && actor.entityKind === 'dominator') fields.supportSlot = actor.supportSlot;
       if (target) { fields.targetIndex = target.sourceIndex; fields.targetKind = target.entityKind; if (target.entityKind === 'dominator') fields.targetSupportSlot = target.supportSlot; }
       return fields;
+    }
+    function counterKey(unit) { return unit.side + ':' + unit.sourceIndex; }
+    function maybeCounter(defender, attacker, hpDamage, at, isCounter) {
+      if (!experimental || !Counter) return;
+      var auto = defender.skills.find(function (profile) { return profile.type === 'auto' && profile.coefficient > 0; });
+      if (!auto) return;
+      var reservation = Counter.reserveCounter(counterState, counterKey(defender), { kind: 'direct', hpDamage: hpDamage, isCounter: isCounter, actorAlive: defender.hp > 0, attackerAlive: attacker.hp > 0 }, Math.round(at * 1000));
+      if (!reservation) return;
+      var attack = Counter.makeAttackProfile(auto, reservation);
+      if (!attack) return;
+      events.push(Object.assign({ time: Math.round(at * 1000) / 1000, type: 'counter-cast', side: defender.side, slot: defender.slot, targetSide: attacker.side, targetSlot: attacker.slot, skillId: attack.id, buffId: reservation.buffId, amount: 0, counterStrength: reservation.strength, experimental: true, damagePolicy: reservation.damagePolicy, impactTime: Math.round((at + attack.counterImpactDelayMs / 1000) * 1000) / 1000 }, entityFields(defender, attacker)));
+      queue.push({ kind: 'counter-impact', time: at + attack.counterImpactDelayMs / 1000, serial: serial++, side: defender.side, slot: defender.slot, supportSlot: defender.supportSlot, entityKind: defender.entityKind, skill: attack, counterTarget: attacker, reservation: reservation });
     }
     function activeDotStacksForTarget(targetSide, targetSlot, buffId, atMs, casterSide, casterSlot) {
       return Object.keys(dotStacks).map(function (id) { return dotStacks[id]; }).filter(function (stack) { return stack.active && stack.targetSide === targetSide && stack.targetSlot === targetSlot && stack.buffId === buffId && stack.expiresMs > atMs && (casterSide === undefined || stack.casterSide === casterSide) && (casterSlot === undefined || stack.casterSlot === casterSlot); });
@@ -369,11 +430,48 @@
         events.push({ time: applyMs / 1000, type: 'dot-apply', side: actor.side, slot: actor.slot, targetSide: target.side, targetSlot: target.slot, skillId: skill.id, buffId: rule.buffId, stackId: id, amount: 0, estimatedTickAmount: amount, expiresAt: stack.expiresMs / 1000, cap: cap, amountPolicy: rule.amountPolicy });
       }
     }
+    function shieldEndedEvent(target, pool, at, reason) {
+      events.push(Object.assign({ time: Math.round(at * 1000) / 1000, type: reason === 'absorbed' ? 'shield-break' : 'shield-expire', side: target.side, slot: target.slot, targetSide: target.side, targetSlot: target.slot, buffId: pool.buffId, amount: 0, remainingShieldRemoved: pool.value, reason: reason }, entityFields(target, target)));
+    }
+    function expireUnitShields(target, at) {
+      expireShieldState(target.shields, Math.round(at * 1000)).forEach(function (pool) { shieldEndedEvent(target, pool, at, 'duration'); });
+    }
+    function grantModeledShield(actor, target, skill, at) {
+      if (!target || target.hp <= 0) return;
+      expireUnitShields(target, at);
+      var granted = grantShieldState(target.shields, skill.sourceShield.buff, skill.level, actor.stats.hp, Math.round(at * 1000), actor.sourceIndex);
+      if (!granted) return;
+      actor.shieldGranted += granted.granted; target.shieldReceived += granted.granted;
+      events.push(Object.assign({ time: Math.round(at * 1000) / 1000, type: 'shield-grant', side: actor.side, slot: actor.slot, targetSide: target.side, targetSlot: target.slot, skillId: skill.id, buffId: skill.sourceShield.buffId, amount: 0, shieldAmount: granted.granted, shield: shieldStateTotal(target.shields, Math.round(at * 1000)), refreshed: granted.refreshed, expiresAt: granted.pool.expiresMs / 1000, targetPolicy: skill.sourceShield.targetPolicy, amountPolicy: skill.sourceShield.amountPolicy, deliveryPolicy: skill.sourceShield.deliveryPolicy, refreshPolicy: 'source same-ID additive1 resets duration only; consumed pool is not refilled' }, entityFields(actor, target)));
+      queue.push({ kind: 'shield-expire', time: granted.pool.expiresMs / 1000, serial: serial++, side: target.side, slot: target.slot, supportSlot: target.supportSlot, entityKind: target.entityKind, shieldTarget: target, buffId: granted.pool.buffId, version: granted.pool.version });
+    }
+    function applyModeledDamage(actor, target, rawAmount, at) {
+      expireUnitShields(target, at);
+      var absorption = consumeShieldState(target.shields, rawAmount, Math.round(at * 1000));
+      var amount = Math.min(target.hp, absorption.remaining);
+      target.hp = Math.max(0, target.hp - amount); target.damageTaken += amount; actor.damageDone += amount;
+      target.shieldDamageTaken += absorption.absorbed; actor.shieldDamageDone += absorption.absorbed;
+      if (absorption.absorbed > 0) events.push(Object.assign({ time: Math.round(at * 1000) / 1000, type: 'shield-absorb', side: actor.side, slot: actor.slot, targetSide: target.side, targetSlot: target.slot, amount: 0, absorbedAmount: absorption.absorbed, shield: absorption.shield, hp: target.hp, accountingPolicy: 'absorbed damage separate; legacy damageDone/damageTaken remain HP loss only, not claimed official aggregate credit' }, entityFields(actor, target)));
+      absorption.broken.forEach(function (pool) { shieldEndedEvent(target, pool, at, 'absorbed'); });
+      return { amount: amount, absorbed: absorption.absorbed, shield: absorption.shield };
+    }
+    function scarlettAdjacentTarget(actor) {
+      var allies = living(actor.side).filter(function (unit) { return unit !== actor; });
+      var back = allies.filter(function (unit) { return unit.slot >= 2; });
+      // The linked source caption position_adjust_desc specifies closest back-row
+      // priority. These normalized coordinates and tie RNG are model policy;
+      // main-PvP slot geometry, fallback and adjacency radius are unrecovered.
+      var positions = [[-1, 0], [1, 0], [-3, 1], [0, 1], [3, 1]], origin = positions[actor.slot], candidates = back.length ? back : allies;
+      if (!candidates.length) return null;
+      function distance(unit) { var p = positions[unit.slot]; return (p[0] - origin[0]) * (p[0] - origin[0]) + (p[1] - origin[1]) * (p[1] - origin[1]); }
+      var minimum = Math.min.apply(null, candidates.map(distance)), tied = candidates.filter(function (unit) { return distance(unit) === minimum; });
+      return tied.length === 1 ? tied[0] : tied[Math.floor(rand() * tied.length)];
+    }
     function criticalChanceAt(unit, at) {
       return unit.stats.critChance + Object.keys(unit.criticalBuffs).reduce(function (total, key) {
         var buff = unit.criticalBuffs[key];
         return total + (at < buff.expiresAt ? buff.value : 0);
-      }, 0);
+      }, 0) + (unit.overlordState && Overlord ? Overlord.deltaAt(unit.overlordState, 50011, at) : 0);
     }
     function nextInterval(actor, skill, castTime) {
       if (!actor.recordedHaste || skill.id !== 501755 || skill.type !== 'auto') return Math.max(0.25, skill.interval);
@@ -382,24 +480,29 @@
       // Expiry does not rewrite an already queued future start.
       return Math.max(0.001, skill.interval / (1 + Math.max(-0.5, rate)));
     }
-    function frame(time) { var f = { time: time, left: teams.left.map(function (u) { return u ? u.hp : 0; }), right: teams.right.map(function (u) { return u ? u.hp : 0; }), support: { left: supportTeams.left.map(function (unit) { return unit.hp; }), right: supportTeams.right.map(function (unit) { return unit.hp; }) } }; if (frames.length && frames[frames.length - 1].time === time) frames[frames.length - 1] = f; else frames.push(f); }
-    function summaries(side) { var us = teams[side].map(function (u) { return u ? { heroId: u.heroId, name: u.name, slot: u.slot, type: u.type, role: u.role, form: u.form, hp: u.hp, maxHp: u.stats.hp, stats: u.stats, alive: u.hp > 0, damageDone: u.damageDone, damageTaken: u.damageTaken, dotDamageDone: u.dotDamageDone, healingDone: u.healingDone, kills: u.kills } : null; }); return { units: us, totalDamage: us.reduce(function (n, u) { return n + (u ? u.damageDone : 0); }, 0), totalHealing: 0, survivors: us.filter(function (u) { return u && u.alive; }).length }; }
-    function supportSummaries(side) { var units = supportTeams[side].map(function (unit) { return { sourceIndex: unit.sourceIndex, index: unit.sourceIndex, heroId: unit.heroId, unitType: 4, entityKind: 'dominator', supportSlot: unit.supportSlot, slot: null, name: unit.name, type: 'dominator', hp: unit.hp, maxHp: unit.stats.hp, stats: unit.stats, alive: unit.hp > 0, damageDone: unit.damageDone, damageTaken: unit.damageTaken, dotDamageDone: unit.dotDamageDone, kills: unit.kills }; }); return { units: units, totalDamage: units.reduce(function (total, unit) { return total + unit.damageDone; }, 0) }; }
+    function frame(time) { var f = { time: time, left: teams.left.map(function (u) { return u ? u.hp : 0; }), right: teams.right.map(function (u) { return u ? u.hp : 0; }), support: { left: supportTeams.left.map(function (unit) { return unit.hp; }), right: supportTeams.right.map(function (unit) { return unit.hp; }) }, shields: { left: teams.left.map(function (unit) { return unit ? shieldStateTotal(unit.shields, Math.round(time * 1000)) : 0; }), right: teams.right.map(function (unit) { return unit ? shieldStateTotal(unit.shields, Math.round(time * 1000)) : 0; }) } }; if (frames.length && frames[frames.length - 1].time === time) frames[frames.length - 1] = f; else frames.push(f); }
+    function summaries(side) { var us = teams[side].map(function (u) { return u ? { heroId: u.heroId, name: u.name, slot: u.slot, type: u.type, role: u.role, form: u.form, hp: u.hp, maxHp: u.stats.hp, stats: u.stats, alive: u.hp > 0, damageDone: u.damageDone, damageTaken: u.damageTaken, dotDamageDone: u.dotDamageDone, healingDone: u.healingDone, shield: shieldStateTotal(u.shields, Math.round(time * 1000)), shieldDamageDone: u.shieldDamageDone, shieldDamageTaken: u.shieldDamageTaken, shieldGranted: u.shieldGranted, shieldReceived: u.shieldReceived, kills: u.kills } : null; }); return { units: us, totalDamage: us.reduce(function (n, u) { return n + (u ? u.damageDone : 0); }, 0), totalHealing: 0, survivors: us.filter(function (u) { return u && u.alive; }).length }; }
+    function supportSummaries(side) { var units = supportTeams[side].map(function (unit) { return { sourceIndex: unit.sourceIndex, index: unit.sourceIndex, heroId: unit.heroId, unitType: 4, entityKind: 'dominator', supportSlot: unit.supportSlot, slot: null, name: unit.name, type: 'dominator', hp: unit.hp, maxHp: unit.stats.hp, stats: unit.stats, alive: unit.hp > 0, damageDone: unit.damageDone, damageTaken: unit.damageTaken, dotDamageDone: unit.dotDamageDone, shield: shieldStateTotal(unit.shields, Math.round(time * 1000)), shieldDamageDone: unit.shieldDamageDone, shieldDamageTaken: unit.shieldDamageTaken, shieldGranted: unit.shieldGranted, shieldReceived: unit.shieldReceived, kills: unit.kills }; }); return { units: units, totalDamage: units.reduce(function (total, unit) { return total + unit.damageDone; }, 0) }; }
     frame(0); var time = 0, processed = 0, reason = 'elimination';
     if (!living('left').length || !living('right').length) { errors.push('Both sides need at least one valid hero.'); reason = 'empty-team'; }
     else while (queue.length && living('left').length && living('right').length) {
       queue.sort(function (a, b) { return a.time - b.time || a.serial - b.serial; }); var action = queue.shift();
       if (action.time > model.maxDuration) { queue.unshift(action); time = model.maxDuration; reason = 'time-limit'; break; }
       if (processed++ >= model.maxEvents) { queue.unshift(action); reason = 'event-limit'; break; }
-      time = action.time; var actor = actorFor(action), fixedImpact = action.kind === 'fixed-impact', burstEmission = action.kind === 'burst-emission';
+      time = action.time; var actor = actorFor(action), fixedImpact = action.kind === 'fixed-impact', burstEmission = action.kind === 'burst-emission', counterImpact = action.kind === 'counter-impact';
+      if (action.kind === 'shield-expire') {
+        var shieldTarget = action.shieldTarget, expiring = shieldTarget && shieldTarget.shields.pools[action.buffId];
+        if (expiring && expiring.version === action.version && expiring.expiresMs <= Math.round(time * 1000)) { expireUnitShields(shieldTarget, time); frame(Math.round(time * 1000) / 1000); }
+        continue;
+      }
       if (action.kind === 'dot-tick') {
         var stack = dotStacks[action.stackId], tickMs = Math.round(time * 1000);
         if (!stack || !stack.active || tickMs > stack.expiresMs) continue;
         var victim = teams[stack.targetSide][stack.targetSlot];
         if (!victim || victim.hp <= 0) { stack.active = false; continue; }
-        var dotAmount = Math.min(victim.hp, stack.amount);
-        victim.hp = Math.max(0, victim.hp - dotAmount); victim.damageTaken += dotAmount; stack.caster.damageDone += dotAmount; stack.caster.dotDamageDone += dotAmount;
-        events.push({ time: tickMs / 1000, type: 'dot', side: stack.casterSide, slot: stack.casterSlot, targetSide: stack.targetSide, targetSlot: stack.targetSlot, skillId: stack.skillId, buffId: stack.buffId, stackId: stack.id, tickNumber: action.tickNumber, amount: dotAmount, rawAmount: stack.amount, crit: false, hp: victim.hp, targetHp: victim.hp, maxHp: victim.stats.hp, damageType: stack.damageType, amountPolicy: 'frozen OWN estimated no-critical tick, not recorded server onceDamage' });
+        var dotResult = applyModeledDamage(stack.caster, victim, stack.amount, time), dotAmount = dotResult.amount;
+        stack.caster.dotDamageDone += dotAmount;
+        events.push({ time: tickMs / 1000, type: 'dot', side: stack.casterSide, slot: stack.casterSlot, targetSide: stack.targetSide, targetSlot: stack.targetSlot, skillId: stack.skillId, buffId: stack.buffId, stackId: stack.id, tickNumber: action.tickNumber, amount: dotAmount, rawAmount: stack.amount, absorbedAmount: dotResult.absorbed, shield: dotResult.shield, crit: false, hp: victim.hp, targetHp: victim.hp, maxHp: victim.stats.hp, damageType: stack.damageType, amountPolicy: 'frozen OWN estimated no-critical tick, not recorded server onceDamage; model shield absorption before HP' });
         if (victim.hp <= 0) { stack.caster.kills++; events.push({ time: tickMs / 1000, type: 'death', side: stack.targetSide, slot: stack.targetSlot, targetSide: stack.targetSide, targetSlot: stack.targetSlot, amount: 0, hp: 0, heroId: victim.heroId }); clearTargetDotStacks(stack.targetSide, stack.targetSlot, time, 'target dead'); }
         else {
           var nextTickMs = stack.applyMs + (action.tickNumber + 1) * stack.intervalMs;
@@ -414,6 +517,34 @@
         continue;
       }
       var other = action.side === 'left' ? 'right' : 'left', skill = action.skill;
+      if (!fixedImpact && !burstEmission && !counterImpact && skill.sourceCounter) {
+        events.push(Object.assign({ time: Math.round(time * 1000) / 1000, type: 'cast', side: actor.side, slot: actor.slot, skillId: skill.id, skill: skill.name, amount: 0, experimental: true, sourceMechanic: 'Adam counter state', policies: Counter.policy }, entityFields(actor)));
+        skill.sourceCounter.grants.forEach(function (grant) {
+          Counter.selectRecipients(actor, allLiving(actor.side), grant).forEach(function (target) {
+            var state = Counter.applyGrant(counterState, counterKey(target), grant, Math.round(time * 1000), counterKey(actor));
+            if (state) events.push(Object.assign({ time: Math.round(time * 1000) / 1000, type: 'buff', side: actor.side, slot: actor.slot, targetSide: target.side, targetSlot: target.slot, skillId: skill.id, buffId: grant.buffId, amount: 0, counterStrength: grant.strength, expiresAt: state.expiresAtMs / 1000, experimental: true, targetPolicy: grant.selector, deliveryPolicy: 'grant at own modeled cast; source delivery travel omitted' }, entityFields(actor, target)));
+          });
+        });
+        queue.push({ time: time + nextInterval(actor, skill, time), serial: serial++, side: actor.side, slot: actor.slot, skill: skill });
+        frame(time); continue;
+      }
+      if (!fixedImpact && !burstEmission && !counterImpact && skill.sourceOverlord) {
+        var grants = Overlord.plan(skill.sourceOverlord, actor, allLiving(other), time);
+        events.push(Object.assign({ time: Math.round(time * 1000) / 1000, type: 'cast', side: actor.side, slot: actor.slot, skillId: skill.id, skill: skill.name, amount: 0, experimental: true, deliveryPolicy: Overlord.policies.delivery }, entityFields(actor)));
+        grants.forEach(function (grant) {
+          var target = grant.target, result = Overlord.add(target.overlordState, grant, time);
+          if (result.applied) events.push(Object.assign({ time: Math.round(time * 1000) / 1000, type: 'buff', side: actor.side, slot: actor.slot, targetSide: target.side, targetSlot: target.slot, skillId: skill.id, buffId: grant.buffId, effectId: grant.effectId, effectDelta: grant.value, amount: 0, expiresAt: grant.expiresAt, experimental: true, targetPolicy: grant.recipientPolicy, deliveryPolicy: grant.deliveryPolicy }, entityFields(actor,target)));
+        });
+        queue.push({ time: time + skill.sourceOverlord.interval, serial: serial++, side: actor.side, slot: null, supportSlot: actor.supportSlot, entityKind: 'dominator', skill: skill });
+        frame(time); continue;
+      }
+      if (!fixedImpact && !burstEmission && !counterImpact && skill.sourceShield) {
+        var shieldRecipient = scarlettAdjacentTarget(actor);
+        events.push(Object.assign({ time: Math.round(time * 1000) / 1000, type: 'cast', side: actor.side, slot: actor.slot, targetSide: actor.side, targetSlots: shieldRecipient ? [shieldRecipient.slot] : [], skillId: skill.id, skill: skill.name, amount: 0, targetPolicy: skill.sourceShield.targetPolicy, deliveryPolicy: skill.sourceShield.deliveryPolicy, omitted: skill.sourceShield.omitted }, entityFields(actor, shieldRecipient)));
+        grantModeledShield(actor, shieldRecipient, skill, time);
+        queue.push({ time: time + nextInterval(actor, skill, time), serial: serial++, side: actor.side, slot: actor.slot, skill: skill });
+        frame(Math.round(time * 1000) / 1000); continue;
+      }
       if (!fixedImpact && !burstEmission && skill.sourceCriticalBuff) {
         var criticalGrant = skill.sourceCriticalBuff, teamCasters = teams[action.side].filter(function (unit) { return unit && unit.skills.some(function (profile) { return !!profile.sourceCriticalBuff; }); });
         if (teamCasters.length === 1) {
@@ -439,15 +570,15 @@
         actor.recordedHaste.windows.push({ start: time, end: time + actor.recordedHaste.duration });
         events.push({ time: Math.round(time * 1000) / 1000, type: 'buff', side: action.side, slot: actor.slot, skillId: skill.id, buffId: 501742, amount: 0, attackSpeedRate: actor.recordedHaste.rate, expiresAt: Math.round((time + actor.recordedHaste.duration) * 1000) / 1000, source: 'modeled exact active cast; source five-stack grant, no observed outcome timing input' });
       }
-      var candidates = skill.sourceAllEnemies ? allLiving(other) : living(other), front = candidates.filter(function (u) { return u.entityKind === 'hero' && u.slot < 2; }), swiftLowestHp = !fixedImpact && !burstEmission && sourceSwiftLowestHp(actor.heroId, skill);
-      var ordered = fixedImpact ? action.targetSlots.map(function (slot) { return teams[other][slot]; }).filter(Boolean) : burstEmission ? (candidates.length ? [candidates[Math.floor(rand() * candidates.length)]] : []) : skill.sourceAllEnemies ? candidates : front.concat(candidates.filter(function (u) { return u.slot >= 2; }));
+      var candidates = skill.sourceAllEnemies ? allLiving(other) : living(other), front = candidates.filter(function (u) { return u.entityKind === 'hero' && u.slot < 2; }), swiftLowestHp = !fixedImpact && !burstEmission && !counterImpact && sourceSwiftLowestHp(actor.heroId, skill);
+      var ordered = counterImpact ? [action.counterTarget] : fixedImpact ? action.targetSlots.map(function (slot) { return teams[other][slot]; }).filter(Boolean) : burstEmission ? (candidates.length ? [candidates[Math.floor(rand() * candidates.length)]] : []) : skill.sourceAllEnemies ? candidates : front.concat(candidates.filter(function (u) { return u.slot >= 2; }));
       if (swiftLowestHp && candidates.length) {
         var lowestRatio = Math.min.apply(null, candidates.map(function (unit) { return unit.hp / unit.stats.hp; }));
         var tiedLowest = candidates.filter(function (unit) { return unit.hp / unit.stats.hp === lowestRatio; });
         ordered = [tiedLowest.length === 1 ? tiedLowest[0] : tiedLowest[Math.floor(rand() * tiedLowest.length)]];
       }
       // Randomize only within the highest-priority row; front occupants always protect back occupants.
-      if (!fixedImpact && !burstEmission && !skill.sourceAllEnemies && !swiftLowestHp && front.length > 1 && rand() > 0.5) { var temp = ordered[0]; ordered[0] = ordered[1]; ordered[1] = temp; }
+      if (!fixedImpact && !burstEmission && !counterImpact && !skill.sourceAllEnemies && !swiftLowestHp && front.length > 1 && rand() > 0.5) { var temp = ordered[0]; ordered[0] = ordered[1]; ordered[1] = temp; }
       // Only the strict exact source Tesla skill/effect metadata enables this
       // delay. Ordinary profiles also pass source form/rank/unlock selection.
       if (!fixedImpact && skill.fixedImpactDelayMs === 200) {
@@ -465,24 +596,24 @@
         }
         var effectiveCriticalChance = criticalChanceAt(actor, time), crit = rand() < effectiveCriticalChance;
         var raw = actor.stats.attack * actor.stats.attack / Math.max(1, actor.stats.attack + target.stats.defense * model.defenseK);
-        var critFactor = crit ? actor.stats.critMultiplier - (prepared ? target.stats.critDamageResistance || 0 : 0) : 1;
+        var critFactor = crit ? actor.stats.critMultiplier - ((prepared ? target.stats.critDamageResistance || 0 : 0) + (target.overlordState && Overlord ? Overlord.deltaAt(target.overlordState, 50154, time) : 0)) : 1;
         raw *= skill.coefficient * model.damageScale * counterFactor(actor.type, target.type, model) * critFactor;
-        var amount = Math.min(target.hp, Math.max(1, Math.round(finite(raw, 1))));
-        target.hp = Math.max(0, target.hp - amount); target.damageTaken += amount; actor.damageDone += amount;
+        var damageResult = applyModeledDamage(actor, target, Math.max(1, Math.round(finite(raw, 1))), time), amount = damageResult.amount;
         var t = Math.round(time * 1000) / 1000;
         if (burstEmission) events.push({ time: t, type: 'emission', side: action.side, slot: actor.slot, skillId: skill.id, amount: 0, targetSide: other, targetSlot: target.slot, castTime: action.castTime, burstShotIndex: action.shotIndex + 1, movingTravelPolicy: 'not modeled; estimated damage at emission' });
-        events.push({ time: t, type: skill.type === 'auto' ? 'attack' : 'skill', side: action.side, slot: actor.slot, targetSide: other, targetSlot: target.slot, amount: amount, rawAmount: Math.max(1, Math.round(raw)), crit: crit, skill: skill.name, skillId: skill.id, hp: target.hp, targetHp: target.hp, maxHp: target.stats.hp, damageType: skill.damageType });
+        events.push({ time: t, type: skill.type === 'auto' ? 'attack' : 'skill', side: action.side, slot: actor.slot, targetSide: other, targetSlot: target.slot, amount: amount, rawAmount: Math.max(1, Math.round(raw)), absorbedAmount: damageResult.absorbed, shield: damageResult.shield, crit: crit, skill: skill.name, skillId: skill.id, hp: target.hp, targetHp: target.hp, maxHp: target.stats.hp, damageType: skill.damageType });
         Object.assign(events[events.length - 1], entityFields(actor, target));
+        if (counterImpact) Object.assign(events[events.length - 1], { attackBack: true, counter: true, experimental: true, counterStrength: skill.counterStrength, counterCastTime: action.reservation.castTimeMs / 1000, counterDamagePolicy: skill.counterDamagePolicy, counterOnHitPolicy: skill.counterOnHitPolicy });
         if (swiftLowestHp) Object.assign(events[events.length - 1], { targetPolicy: 'source Swift EW scheduled auto: lowest modeled current HP percentage; one primary target only, radius omitted; exact ties use seeded model RNG' });
-        if (Object.keys(actor.criticalBuffs).length) Object.assign(events[events.length - 1], { modeledCriticalChance: effectiveCriticalChance, temporaryCriticalDelta: effectiveCriticalChance - actor.stats.critChance });
+        if (Object.keys(actor.criticalBuffs).length || actor.overlordState && actor.overlordState.stacks.length) Object.assign(events[events.length - 1], { modeledCriticalChance: effectiveCriticalChance, temporaryCriticalDelta: effectiveCriticalChance - actor.stats.critChance });
         if (fixedImpact) Object.assign(events[events.length - 1], { castTime: action.castTime, impactDelayMs: 200, sourceEffectId: 5016450 });
         if (burstEmission) Object.assign(events[events.length - 1], { castTime: action.castTime, emissionTime: t, burstShotIndex: action.shotIndex + 1, burstBaseCount: skill.sourceBurst.count, sourceBulletId: 500935, sourceDamageComponentIndex: 2, movingTravelPolicy: 'not modeled; estimated damage at emission' });
-        if (prepared && crit) Object.assign(events[events.length - 1], { initialCriticalMultiplierCandidate: critFactor, targetInitialCritDamageResistance: target.stats.critDamageResistance || 0, criticalRuleBasis: 'observational initial hero50012−target50154 candidate; dynamic buffs and server caps unresolved' });
+        if (prepared && crit) Object.assign(events[events.length - 1], { initialCriticalMultiplierCandidate: actor.stats.critMultiplier - (target.stats.critDamageResistance || 0), modeledCriticalMultiplier: critFactor, targetTemporaryCritDamageResistance: target.overlordState && Overlord ? Overlord.deltaAt(target.overlordState, 50154, time) : 0, targetInitialCritDamageResistance: target.stats.critDamageResistance || 0, criticalRuleBasis: 'observational initial hero50012−target50154 candidate; only optional Gorilla critical overlays and Marshall critical grants alter initial properties; other dynamic buffs and server caps unresolved' });
         if (target.hp <= 0) { actor.kills += 1; events.push({ time: t, type: 'death', side: other, slot: target.slot, targetSide: other, targetSlot: target.slot, amount: 0, hp: 0, heroId: target.heroId }); Object.assign(events[events.length - 1], entityFields(target,target)); clearTargetDotStacks(other, target.slot, time, 'target dead'); }
-        else grantDot(actor, target, skill, time);
+        else { if (!counterImpact) grantDot(actor, target, skill, time); maybeCounter(target, actor, amount, time, counterImpact); }
       });
       frame(Math.round(time * 1000) / 1000);
-      if (!fixedImpact && !burstEmission) queue.push({ time: time + nextInterval(actor, skill, time), serial: serial++, side: action.side, slot: action.slot, supportSlot: action.supportSlot, entityKind: action.entityKind, skill: skill });
+      if (!fixedImpact && !burstEmission && !counterImpact) queue.push({ time: time + nextInterval(actor, skill, time), serial: serial++, side: action.side, slot: action.slot, supportSlot: action.supportSlot, entityKind: action.entityKind, skill: skill });
     }
     if (reason !== 'empty-team' && !queue.length && living('left').length && living('right').length) reason = 'no-damaging-skills';
     var winner = reason === 'empty-team' ? 'draw' : !living('left').length && living('right').length ? 'right' : !living('right').length && living('left').length ? 'left' : 'draw';
@@ -491,7 +622,8 @@
     events.push({ time: duration, type: 'end', winner: winner, reason: reason, amount: 0 });
     return { winner: winner, duration: duration, reason: reason, events: events, frames: frames, timeline: frames, initial: initial, left: left, right: right,
       totalDamage: { left: left.totalDamage, right: right.totalDamage }, support: { initial: supportInitial, left: supportSummaries('left'), right: supportSummaries('right'), eliminationPolicy: 'Only five-hero survival decides modeled victory; source playback supplies results and does not prove a support-aware victory solver.', targetScope: 'DVA all-enemy and Marshall ally critical grants include modeled Dominator; generic front-row/Swift scheduled targeting remains hero-only.' }, seed: input.seed === undefined ? 12345 : input.seed, model: model,
-      roles: roles, capabilities: CAPABILITIES, notes: Array.from(new Set(notes)), modelNotes: MODEL_NOTES.slice(), unsupportedSkills: unsupported, caveats: MODEL_NOTES.slice(), errors: errors,
+      roles: roles, capabilities: Object.assign({}, CAPABILITIES, { experimentalMechanicsEnabled: experimental }), notes: Array.from(new Set(notes)), modelNotes: MODEL_NOTES.slice(), unsupportedSkills: unsupported, caveats: MODEL_NOTES.slice(), errors: errors,
+      pendingCounterImpactsAtEnd: queue.filter(function (action) { return action.kind === 'counter-impact'; }).map(function (action) { return { side: action.side, sourceIndex: actorFor(action).sourceIndex, targetIndex: action.counterTarget.sourceIndex, skillId: action.skill.id, castTime: action.reservation.castTimeMs / 1000, scheduledImpactTime: Math.round(action.time * 1000) / 1000, stateExpiresAt: action.reservation.stateExpiresAtMs / 1000, status: 'reserved counter not executed before simulation termination', experimental: true }; }),
       pendingImpactsAtEnd: queue.filter(function (a) { return a.kind === 'fixed-impact'; }).map(function (a) { return { side: a.side, slot: a.slot, skillId: a.skill.id, castTime: a.castTime, scheduledImpactTime: Math.round(a.time * 1000) / 1000, targetSlots: a.targetSlots.slice(), status: 'not executed before simulation termination' }; }),
       pendingEmissionsAtEnd: queue.filter(function (a) { return a.kind === 'burst-emission'; }).map(function (a) { return { side: a.side, slot: a.slot, skillId: a.skill.id, castTime: a.castTime, scheduledEmissionTime: Math.round(a.time * 1000) / 1000, burstShotIndex: a.shotIndex + 1, status: 'not emitted before simulation termination' }; }),
       pendingDotTicksAtEnd: queue.filter(function (a) { return a.kind === 'dot-tick' && dotStacks[a.stackId] && dotStacks[a.stackId].active; }).map(function (a) { var stack = dotStacks[a.stackId]; return { side: stack.casterSide, slot: stack.casterSlot, targetSide: stack.targetSide, targetSlot: stack.targetSlot, buffId: stack.buffId, stackId: stack.id, scheduledTickTime: Math.round(a.time * 1000) / 1000, estimatedTickAmount: stack.amount, status: 'not executed before simulation termination' }; }) };
@@ -519,7 +651,7 @@
   function recordedModelNote(note) {
     if (note.indexOf('Recovered client template/rank parameters') === 0) return 'Recorded initial HP, attack, defense and critical properties are used directly; no template, gear, technology or form stat reconstruction is performed.';
     if (note.indexOf('Critical chance uses an assumed base') === 0) return 'Recorded initial critical properties are retained without the normal setup85% chance cap; initial50154 resistance uses an observational subtraction candidate. Only exact Marshall temporary critical grants are generated; other evolving critical changes remain unmodeled.';
-    if (note.indexOf('Only generic auto') === 0) return 'Exact recorded auto/active damage, Marshall critical grants, DVA targets/haste, Tesla timing, Kimberly base rockets and Swift/Tesla DOT clocks/caps are bounded source profiles. DOT amounts are own estimates; most passives, shields, other DOT, healing, support and awakening triggers remain omitted.';
+    if (note.indexOf('Only generic auto') === 0) return 'Exact recorded auto/active damage, Marshall critical grants, DVA targets/haste, Tesla timing, Kimberly base rockets and Swift/Tesla DOT clocks/caps are bounded source profiles. DOT amounts are own estimates; Scarlett6%-HP shield/9s state uses modeled adjacency/delivery/absorption; most passives, other shields, other DOT, healing, support and awakening triggers remain omitted.';
     return note;
   }
   function sourceSkillCatalog(hero) {
@@ -714,14 +846,15 @@
         if (profile.type === 'auto' && (!(profile.interval > 0) || !number(source.intervalMs) || !number(source.preCdMs) || source.preCdMs < 0)) fail(path + '.skillInfos', 'Dominator auto timing requires positive exact source interval and nonnegative pre-CD.');
         profiles.push(profile);
       });
-      var autos = profiles.filter(function (profile) { return profile.type === 'auto' && profile.groupId === 800000 && profile.coefficient > 0; });
+      profiles.forEach(function (profile) { profile.sourceOverlord = Number(modelInput.experimentalMechanics) === 1 && Overlord ? Overlord.profile(raw.heroId, profile, data.recordedBuffs) : null; });
+      var autos = profiles.filter(function (profile) { return profile.type === 'auto' && profile.groupId === 800000 && profile.coefficient > 0; }), activeBuffs = profiles.filter(function (profile) { return !!profile.sourceOverlord; });
       if (autos.length !== 1) fail(path + '.skillInfos', 'Exactly one exact supported positive Dominator auto profile is required; no generic damage is synthesized.');
       if (errors.length !== startErrors) return;
       var side = index === 13 ? 'left' : 'right', maxHp = effects[52004], startingHp = raw.hpBeforeStart === raw.maxHp ? maxHp : raw.hpBeforeStart;
-      var unsupportedProfiles = profiles.filter(function (profile) { return profile !== autos[0]; }).map(function (profile) { return { heroId: raw.heroId, skillId: profile.id, groupId: profile.groupId, name: profile.name, level: profile.level, reason: 'Dominator buff-only active, expertise and triggered/passive mechanics are retained but not executed as invented damage.' }; });
+      var unsupportedProfiles = profiles.filter(function (profile) { return profile !== autos[0] && activeBuffs.indexOf(profile) < 0; }).map(function (profile) { return { heroId: raw.heroId, skillId: profile.id, groupId: profile.groupId, name: profile.name, level: profile.level, reason: 'Dominator expertise and triggered/passive mechanics are retained but not executed as invented damage; timed critical active requires the experimental option.' }; });
       var unit = { heroId: raw.heroId, sourceIndex: index, index: index, unitType: 4, entityKind: 'dominator', name: definition.name || 'Dominator', nameKey: definition.nameKey, image: definition.image || '', type: 'dominator', role: explicitRole ? modelInput.attackerSide === side ? 'attacker' : 'defender' : 'unknown', form: 'recorded-support', level: number(raw.heroLevel) ? raw.heroLevel : null,
         stats: { hp: maxHp, attack: effects[52014], defense: effects[52024], critChance: effects[50011], critMultiplier: effects[50012], critDamageResistance: effects[50154] === undefined ? 0 : effects[50154] }, initialHp: startingHp,
-        skills: autos, allSkills: profiles, unsupportedSkills: unsupportedProfiles, notes: ['Recorded Dominator dedicated-final52004/52014/52024 plus generic critical inputs; no hero-stat/gear/research reconstruction. Only source auto damage is modeled; special active/passive/support rules and a support-aware victory solver remain unresolved.'], config: { heroId: raw.heroId, form: 'recorded-support', sourceIndex: index } };
+        skills: autos.concat(activeBuffs), allSkills: profiles, unsupportedSkills: unsupportedProfiles, notes: ['Recorded Dominator dedicated-final52004/52014/52024 plus generic critical inputs; no hero-stat/gear/research reconstruction. Auto damage and optional experimental critical active only; other passives and support-aware victory remain unresolved.'], config: { heroId: raw.heroId, form: 'recorded-support', sourceIndex: index } };
       prepared.supports[side].push(unit);
       supportBindings.push({ sourceIndex: index, heroId: raw.heroId, side: side, requiredEffects: { 52004: maxHp, 52014: effects[52014], 52024: effects[52024], 50011: effects[50011], 50012: effects[50012] }, skillIds: profiles.map(function (profile) { return profile.id; }), modeledAutoSkillId: autos[0].id, sourceBinding: definition.sourceBinding, hpSource: raw.hpBeforeStart === raw.maxHp ? 'dedicated float final52004 agrees with full integer HP' : 'dedicated max final52004; wounded integer starting HP retained' });
       var stat = raw.stat || {};
@@ -808,9 +941,9 @@
         profiles.push(profile);
         if (profile.recordedLevelAboveSnapshotCap) warnings.push({ index: rawUnit.index, skillId: info.skillId, reason: 'Recorded level exceeds snapshot row cap; recorded level retained, eligibility/config equivalence unproven.' });
       });
-      profiles.forEach(function (profile) { profile.sourceCriticalBuff = sourceMarshallCriticalBuff(hero, profile, data); profile.sourceDot = sourceDotProfile(profile.raw, data); });
-      var autos = profiles.filter(function (p) { return p.type === 'auto' && p.coefficient > 0; }), actives = profiles.filter(function (p) { return p.type === 'active' && p.coefficient > 0; }), supports = profiles.filter(function (p) { return !!p.sourceCriticalBuff; });
-      if (supports.length > 1) { supports = []; warnings.push({ index: rawUnit.index, reason: 'Multiple Marshall critical profiles are ambiguous; their combined grant is not executed.' }); }
+      profiles.forEach(function (profile) { profile.sourceCriticalBuff = sourceMarshallCriticalBuff(hero, profile, data); profile.sourceDot = sourceDotProfile(profile.raw, data); profile.sourceShield = sourceScarlettShield(hero, profile, data); profile.sourceCounter = Number(modelInput.experimentalMechanics) === 1 && Counter ? Counter.profileFor(hero.id, profile, data) : null; });
+      var autos = profiles.filter(function (p) { return p.type === 'auto' && p.coefficient > 0; }), actives = profiles.filter(function (p) { return p.type === 'active' && p.coefficient > 0; }), supports = profiles.filter(function (p) { return !!p.sourceCriticalBuff || !!p.sourceShield || !!p.sourceCounter; });
+      if (supports.length > 1) { supports = []; warnings.push({ index: rawUnit.index, reason: 'Multiple exact support profiles are ambiguous; their combined grant is not executed.' }); }
       if (!autos.length) fail(path + '.skillInfos', 'No exact supported positive auto-attack profile; no generic auto inserted.');
       var used = [autos[0], actives[0]].filter(Boolean).concat(supports), unsupported = profiles.filter(function (p) { return used.indexOf(p) < 0; }).map(function (p) {
         return { heroId: rawUnit.heroId, skillId: p.id, groupId: p.groupId, name: p.name, level: p.level, reason: p.sourceDirectDamage.reviewed && !p.sourceDirectDamage.directBulletSupported ? 'Source PvP effects contain no positive Bullet action; buff-only metadata is not executed as direct damage.' : p.coefficient <= 0 ? 'Non-damaging recorded ability is not replaced by invented damage.' : 'Recorded passive/triggered/extra ability mechanics remain unsupported.' };
@@ -837,7 +970,7 @@
         stats: { hp: maxHp, attack: effects[50015], defense: effects[50017], critChance: effects[50011], critMultiplier: effects[50012], critDamageResistance: effects[50154] === undefined ? 0 : effects[50154] }, initialHp: startingHp,
         recordedHaste: haste,
         skills: used, allSkills: profiles, unsupportedSkills: unsupported,
-        notes: ['Explicit recorded effective stats, exact skill IDs and recorded levels; no setup stats, gear, technology or form bonuses were synthesized.'].concat(supports.length ? ['Marshall source critical-only team buff is applied at modeled cast (delivery approximation), with exact0.1 delta and7/8s expiry. Paired attack/support buffs remain unsupported.'] : []),
+        notes: ['Explicit recorded effective stats, exact skill IDs and recorded levels; no setup stats, gear, technology or form bonuses were synthesized.'].concat(supports.some(function (profile) { return !!profile.sourceCriticalBuff; }) ? ['Marshall source critical-only team buff is applied at modeled cast (delivery approximation), with exact0.1 delta and7/8s expiry. Paired attack/support buffs remain unsupported.'] : []),
         config: { heroId: rawUnit.heroId, recorded: true }, sourceBinding: binding,
         capabilities: Object.assign({}, CAPABILITIES, { inputMode: 'recorded-effective-snapshot', gear: 'not reconstructed', technology: 'not reconstructed', criticalInputs: 'recorded without setup cap' }) };
       var stat = rawUnit.stat || {};
@@ -885,17 +1018,19 @@
     if (appliedDelays.length) result.modelNotes.push('ExactTesla501645 impacts use source-fixed200ms after model cast; original targets stay locked. Caster-death cancellation and impact-time RNG/stat evaluation remain unverified model assumptions.');
     if (dvaHaste.length) result.modelNotes.push('ExactDVA501755 uses source501742 five-stack haste windows from recorded501775 opening and modeled501765 active casts. Initial pre-CD stays unchanged; each later gap uses source interval/(1+rate). Other buff stacking, interruption and dispel mechanics remain omitted.');
     if (sourceBursts.length) result.modelNotes.push('Kimberly exact weapon active500950–500955 emits16source-base rockets100ms apart with verified per-rocket component2 coefficient. First200ms offset is empirical; extra energy-stack rockets, splash and moving travel are unmodeled.');
-    if (sourceDots.length) result.modelNotes.push('Exact Swift/Tesla OnHit source DOT stacks use independent1s clocks, inclusive10/30s expiration, missile-count caps and suppression of new stacks at cap. Frozen tick amounts are own no-critical estimates, not supplied replay onceDamage; secondary splash/passive grants and shields are unmodeled. Swift compiled8% differs from10% caption.');
+    if (sourceDots.length) result.modelNotes.push('Exact Swift/Tesla OnHit source DOT stacks use independent1s clocks, inclusive10/30s expiration, missile-count caps and suppression of new stacks at cap. Frozen tick amounts are own no-critical estimates, not supplied replay onceDamage; secondary splash/passive grants and most shield generators are unmodeled. Swift compiled8% differs from10% caption.');
     result.caveats = result.modelNotes.slice();
     result.notes = Array.from(new Set(result.notes.map(recordedModelNote).concat(diagnostics.limitations)));
     if (cooldowns.length) result.notes.push('Recorded active cooldown rates are applied with the source lower bound-0.5 and observed whole-millisecond quantization; ordinary setup timing is unchanged.');
     result.capabilities = Object.assign({}, CAPABILITIES, { inputMode: 'recorded-effective-snapshot', gear: 'not reconstructed', technology: 'not reconstructed', criticalInputs: 'recorded without setup cap; initial50154 subtraction is observational and positive-domain only', fixedImpactTiming: 'source-fixedTesla501645/5016450:200ms only; cancellation policy unverified', targetCount: 'single source Bullet scalar counts plus exactDVA all-living-enemy-hero and modeled recordedDominator active targets; other target selection/support eligibility still estimated or unsupported', directDamageEligibility: 'positive coefficient plus source Bullet action required when reviewed effect metadata is available', attackSpeedBuffs: 'exactDVA501755/source501742 five-stack opening and active haste windows only; general buff solver unavailable', burstMechanics: 'Kimberly500950–500955:16source-base rockets/100ms; empirical200msfirstoffset; no energy-stack count, splash or moving travel' });
+    result.capabilities.experimentalMechanicsEnabled = Number(modelInput.experimentalMechanics) === 1;
     result.capabilities.dotMechanics = 'exactSwift501520/Tesla501640 independent1s source clocks/caps; own estimated frozen no-critical amounts; no observed damage inputs';
-    result.capabilities.recordedDominator = 'recorded-only exact final52004/52014/52024 plus50011/50012; neutral counter and auto only; dedicated active/passive solver and support-aware victory unresolved';
+    result.capabilities.recordedDominator = 'recorded-only exact final52004/52014/52024 plus50011/50012; neutral troop counter and auto; optional experimental timed critical active; other passives/support-aware victory unresolved';
     return result;
   }
-  return { version: '0.3.10-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
+  return { version: '0.4.0-estimated', DEFAULT_MODEL: DEFAULT_MODEL, defaultModel: DEFAULT_MODEL, MODEL_NOTES: MODEL_NOTES, capabilities: CAPABILITIES,
     computeUnit: computeUnit, resolveExperience: resolveExperience, simulate: simulate, simulateRecordedSnapshot: simulateRecordedSnapshot,
     recordedEffectMapping: RECORDED_EFFECT_MAPPING, recordedInputEvidence: RECORDED_INPUT_EVIDENCE,
-    equipmentSelection: equipmentSelection, technologyModifiers: technologyModifiers };
+    equipmentSelection: equipmentSelection, technologyModifiers: technologyModifiers,
+    shieldMechanics: { amount: sourceShieldAmount, createState: shieldState, grant: grantShieldState, expire: expireShieldState, consume: consumeShieldState, total: shieldStateTotal } };
 });

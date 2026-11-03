@@ -35,7 +35,7 @@ function gearConfig(key,value){
  return{itemId:Number(item.id),level,promotion};
 }
 function unit(id){return{heroId:id,form:'base',level:100,exp:0,shardLevel:3,skillLevel:20,skillLevels:{},gear:Object.fromEntries(Object.keys(gearSlots).map(k=>[k,gearConfig(k,20)])),weaponLevel:10,awakenLevel:1};}
-const defaults={v:2,left:[50006,50007,50009,50010,50008].map(unit),right:[50013,50006,50016,50017,50018].map(id=>unit(byId.has(id)?id:heroes[0].id)),attackerSide:'left',tech:{left:{research:{},squadNo:1},right:{research:{},squadNo:1}},seed:42,model:{defenseK:1,maxDuration:60}};
+const defaults={v:2,left:[50006,50007,50009,50010,50008].map(unit),right:[50013,50006,50016,50017,50018].map(id=>unit(byId.has(id)?id:heroes[0].id)),attackerSide:'left',tech:{left:{research:{},squadNo:1},right:{research:{},squadNo:1}},seed:42,model:{defenseK:1,maxDuration:60,experimentalMechanics:0}};
 let setup=clone(defaults),selected={side:'left',slot:0},result=null,playTime=0,playing=false,lastTick=0,raf=0,dragSource=null,toastTimer,researchSide='left';
 function normalize(v){
  if(!v||!Array.isArray(v.left)||!Array.isArray(v.right)||v.left.length!==5||v.right.length!==5)throw Error('Invalid formations');
@@ -49,13 +49,13 @@ function normalize(v){
  }
  out.seed=Math.max(1,Math.min(4294967295,Math.trunc(Number(v.seed)||42)));
  out.attackerSide=v.attackerSide==='right'?'right':'left';
- out.model={defenseK:Math.max(0,Math.min(100,Number(v.model?.defenseK)??1)),maxDuration:Math.max(5,Math.min(180,Number(v.model?.maxDuration)||60))};if(!Number.isFinite(out.model.defenseK))out.model.defenseK=1;
+ out.model={experimentalMechanics:v.model?.experimentalMechanics===true||v.model?.experimentalMechanics===1?1:0,defenseK:Math.max(0,Math.min(100,Number(v.model?.defenseK)??1)),maxDuration:Math.max(5,Math.min(180,Number(v.model?.maxDuration)||60))};if(!Number.isFinite(out.model.defenseK))out.model.defenseK=1;
  return out;
 }
 try{if(location.hash.startsWith('#setup='))setup=normalize(JSON.parse(decodeURIComponent(location.hash.slice(7))));else setup=normalize(getStore('lw-battle-autosave',defaults));}catch{setup=clone(defaults);}
 const portrait=(h,c)=>h?.modes?.[c?.form||'base']?.image||h?.image||'';
 function deployedTypes(side){const counts={tank:0,missile:0,aircraft:0};for(const c of setup[side]){if(!c)continue;const type=String(byId.get(c.heroId)?.type||'tank').toLowerCase();counts[type.includes('air')?'aircraft':type.includes('missile')?'missile':'tank']++;}return counts;}
-function computed(c,side){if(!c)return null;try{return E.computeUnit({...c,role:setup.attackerSide===side?'attacker':'defender',deployedTypes:deployedTypes(side)},{...setup.tech[side],deployedArmyTypeCounts:deployedTypes(side)},D);}catch{return null;}}
+function computed(c,side){if(!c)return null;try{return E.computeUnit({...c,role:setup.attackerSide===side?'attacker':'defender',deployedTypes:deployedTypes(side)},{...setup.tech[side],deployedArmyTypeCounts:deployedTypes(side)},D,setup.model);}catch{return null;}}
 function toast(key){$('toast').textContent=t(key);$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,2600);}
 function stop(){playing=false;cancelAnimationFrame(raf);$('play').textContent=t('play');}
 function invalidate(){stop();result=null;window.LastWikiReplay?.setSimulation(null);playTime=0;$('results').hidden=true;$('run-status').textContent=t('setupChanged');setStore('lw-battle-autosave',setup);renderBoards();}
@@ -64,7 +64,7 @@ function renderChrome(){
  document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=t(el.dataset.i18n));
  $('language').innerHTML=Object.entries(langs).map(([k,n])=>`<option value="${k}"${k===lang?' selected':''}>${n}</option>`).join('');
  $('attacker-side').innerHTML=['left','right'].map(s=>`<option value="${s}"${setup.attackerSide===s?' selected':''}>${esc(t(s==='left'?'teamA':'teamB'))}</option>`).join('');$('attacker-side').setAttribute('aria-label',t('attacker'));
- $('seed').value=setup.seed;$('defense-k').value=setup.model.defenseK;$('max-duration').value=setup.model.maxDuration;
+ $('seed').value=setup.seed;$('defense-k').value=setup.model.defenseK;$('max-duration').value=setup.model.maxDuration;$('experimental-mechanics').checked=setup.model.experimentalMechanics===1;
  $('model-notes').innerHTML=`<p>${esc(t('researchNote'))}</p><p>${esc(t('roleNote'))}</p>`;
  $('research-search').placeholder=t('searchResearch');$('research-search').setAttribute('aria-label',t('searchResearch'));$('research-category').setAttribute('aria-label',t('allCategories'));$('research-squad').setAttribute('aria-label',t('squad'));
 }
@@ -72,7 +72,7 @@ function slotHtml(side,i){
  const c=setup[side][i],h=c&&byId.get(c.heroId),u=computed(c,side),active=selected.side===side&&selected.slot===i;
  if(!h)return`<button class="hero-slot empty${active?' selected':''}" data-slot="${i}" data-side="${side}" aria-label="${esc(t(side==='left'?'teamA':'teamB')+' '+t('position')+' '+(i+1)+' · '+t('empty'))}"><span class="slot-num">${i+1}</span><span class="empty-slot"><b>+</b>${esc(t('selectHero'))}</span></button>`;
  const formLabel=c.form==='base'?'':t(c.form);
- return`<button draggable="true" class="hero-slot ${h.rarity.toLowerCase()}${active?' selected':''}" data-slot="${i}" data-side="${side}" aria-label="${esc(t(side==='left'?'teamA':'teamB')+' '+t('position')+' '+(i+1)+' · '+name(h))}"><span class="slot-num">${i+1}</span>${formLabel?`<span class="slot-mode">${esc(formLabel)}</span>`:''}<img class="slot-art" src="${esc(portrait(h,c))}" alt="${esc(name(h))}" loading="lazy"><span class="slot-name">${esc(name(h))}</span><span class="slot-level">${esc(t('level'))} ${num(u?.effectiveLevel||c.level)} · ${num(c.shardLevel,1)} ★</span><span class="health-track"><span data-hp="${side}-${i}" style="width:100%"></span></span></button>`;
+ return`<button draggable="true" class="hero-slot ${h.rarity.toLowerCase()}${active?' selected':''}" data-slot="${i}" data-side="${side}" aria-label="${esc(t(side==='left'?'teamA':'teamB')+' '+t('position')+' '+(i+1)+' · '+name(h))}"><span class="slot-num">${i+1}</span>${formLabel?`<span class="slot-mode">${esc(formLabel)}</span>`:''}<img class="slot-art" src="${esc(portrait(h,c))}" alt="${esc(name(h))}" loading="lazy"><span class="slot-name">${esc(name(h))}</span><span class="slot-level">${esc(t('level'))} ${num(u?.effectiveLevel||c.level)} · ${num(c.shardLevel,1)} ★</span><span class="shield-track" hidden><span data-shield="${side}-${i}"></span></span><span class="health-track"><span data-hp="${side}-${i}" style="width:100%"></span></span></button>`;
 }
 function renderBoards(){
  for(const side of ['left','right']){
@@ -138,8 +138,8 @@ function renderInspector(){
 function update(){invalidate();renderInspector();}
 function move(from,to){if(from.side!==to.side){toast('invalidFile');return;}[setup[from.side][from.slot],setup[to.side][to.slot]]=[setup[to.side][to.slot],setup[from.side][from.slot]];selected=to;update();}
 function frameAt(time){if(!result)return null;let frame=result.frames?.[0];for(const f of result.frames||[]){if(f.time>time)break;frame=f;}return frame;}
-function paintHealth(time){const f=frameAt(time);if(!f)return;for(const side of ['left','right'])for(let i=0;i<5;i++){const max=result.initial[side][i]?.stats?.hp||1,hp=Number(f[side]?.[i]??0),bar=document.querySelector(`[data-hp="${side}-${i}"]`),card=bar?.closest('.hero-slot');if(bar)bar.style.width=(100*Math.max(0,Math.min(1,hp/max)))+'%';if(card)card.classList.toggle('dead',hp<=0);}$('clock').textContent=num(time,2)+'s';$('timeline').value=time;}
-function eventText(e){const source=result?.initial?.[e.side]?.[e.slot],target=result?.initial?.[e.targetSide]?.[e.targetSlot];const sourceName=source?name(byId.get(source.heroId)):t('result'),targetName=target?name(byId.get(target.heroId)):'';return [sourceName,e.skill||e.type,targetName?('→ '+targetName):'',e.amount?num(e.amount):'',e.crit?(' · '+t('critical')):''].filter(Boolean).join(' ');}
+function paintHealth(time){const f=frameAt(time);if(!f)return;for(const side of ['left','right'])for(let i=0;i<5;i++){const max=result.initial[side][i]?.stats?.hp||1,hp=Number(f[side]?.[i]??0),bar=document.querySelector(`[data-hp="${side}-${i}"]`),card=bar?.closest('.hero-slot');if(bar)bar.style.width=(100*Math.max(0,Math.min(1,hp/max)))+'%';if(card)card.classList.toggle('dead',hp<=0);const shield=Number(f.shields?.[side]?.[i]||0),shieldBar=document.querySelector(`[data-shield="${side}-${i}"]`);if(shieldBar){shieldBar.style.width=(100*Math.max(0,Math.min(1,shield/max)))+'%';shieldBar.parentElement.hidden=shield<=0;shieldBar.parentElement.title=t('shield')+': '+num(shield);}}$('clock').textContent=num(time,2)+'s';$('timeline').value=time;}
+function eventText(e){const source=result?.initial?.[e.side]?.[e.slot],target=result?.initial?.[e.targetSide]?.[e.targetSlot];const sourceName=source?name(byId.get(source.heroId)):t('result'),targetName=target?name(byId.get(target.heroId)):'';return [sourceName,(e.attackBack?t('counter')+' · ':'')+(e.skill||(/^shield-/.test(e.type)?t('shield'):e.type)),targetName?('→ '+targetName):'',e.amount?num(e.amount):'',e.shieldAmount?t('shield')+' +'+num(e.shieldAmount):'',e.absorbedAmount?t('absorbed')+' '+num(e.absorbedAmount):'',e.crit?(' · '+t('critical')):''].filter(Boolean).join(' ');}
 function renderResults(){
  if(!result)return;$('results').hidden=false;
  $('result-title').textContent=result.winner==='draw'?t('draw'):t('winner')+' · '+t(result.winner==='left'?'teamA':'teamB');$('result-duration').textContent=num(result.duration,2)+' '+t('seconds');
@@ -195,6 +195,7 @@ for(const [id,key] of [['seed','seed'],['defense-k','defenseK'],['max-duration',
 $('remove-hero').addEventListener('click',()=>{setup[selected.side][selected.slot]=null;update();});
 $('copy-team').addEventListener('click',()=>{setup.right=clone(setup.left);setup.tech.right=clone(setup.tech.left);update();});
 $('swap-teams').addEventListener('click',()=>{[setup.left,setup.right]=[setup.right,setup.left];[setup.tech.left,setup.tech.right]=[setup.tech.right,setup.tech.left];update();renderChrome();});
+$('experimental-mechanics').addEventListener('change',e=>{setup.model.experimentalMechanics=e.target.checked?1:0;invalidate();});
 $('run').addEventListener('click',run);
 $('play').addEventListener('click',()=>{if(!result)return;if(playing){stop();return;}if(playTime>=result.duration)playTime=0;playing=true;lastTick=0;$('play').textContent=t('pause');raf=requestAnimationFrame(tick);});
 $('reset').addEventListener('click',()=>{stop();playTime=0;paintHealth(0);});
@@ -206,6 +207,7 @@ $('import').addEventListener('click',()=>$('import-file').click());
 $('import-file').addEventListener('change',async e=>{const f=e.target.files[0];try{if(!f||f.size>200000)throw Error();const parsed=normalize(JSON.parse(await f.text()));setup=parsed;invalidate();renderAll();toast('saved');}catch{toast('invalidFile');}e.target.value='';});
 $('share').addEventListener('click',async()=>{const url=new URL(location.href);url.searchParams.set('lang',lang);url.hash='setup='+encodeURIComponent(JSON.stringify(setup));history.replaceState(null,'',url);try{await navigator.clipboard.writeText(url.href);toast('copied');}catch{toast('share');}});
 $('download-log').addEventListener('click',()=>{if(result)download('last-wiki-estimated-battle.json',{status:'Estimated model, not official game output',setup,result});});
+window.LastWikiSimulator=Object.freeze({getModelOptions:()=>({...setup.model,seed:setup.seed,attackerSide:setup.attackerSide})});
 window.LastWikiReplay?.init($('replay-lab'),lang);
 renderAll();
 })();
